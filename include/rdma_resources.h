@@ -1,0 +1,52 @@
+// rdma_resources.h
+// Copyright (C) 2024 Feng Ren
+
+#ifndef RDMA_RESOURCES_H
+#define RDMA_RESOURCES_H
+
+#include <glog/logging.h>
+#include <gflags/gflags.h>
+#include <infiniband/verbs.h>
+
+struct MemoryRegionKey {
+    MemoryRegionKey(uint32_t lkey = 0, uint32_t rkey = 0) : lkey(lkey), rkey(rkey) {}
+
+    bool operator==(const MemoryRegionKey &rhs) const { 
+        return (lkey == rhs.lkey && rkey == rhs.rkey);
+    }
+
+    bool IsValid() const { return lkey && rkey; }
+
+    uint32_t lkey;
+    uint32_t rkey;
+};
+
+void CreateRdmaGlobalResource();
+
+MemoryRegionKey RegisterRdmaMemoryRegion(void *addr, size_t length, int access = IBV_ACCESS_LOCAL_WRITE);
+
+MemoryRegionKey GetRdmaMemoryRegion(void *buf);
+
+void DeregisterRdmaMemoryRegion(void *addr);
+
+int GetRdmaCompVector();
+
+ibv_context *GetRdmaContext();
+
+ibv_pd *GetRdmaProtectionDomain();
+
+ibv_comp_channel *GetRdmaCompletionChannel();
+
+uint8_t GetRdmaPortNum();
+
+uint8_t GetRdmaGidIndex();
+
+ibv_gid GetRdmaGid();
+
+uint16_t GetRdmaLid();
+
+bool IsRdmaAvailable();
+
+int ProcessEvents();
+
+#endif // RDMA_RESOURCES_H
