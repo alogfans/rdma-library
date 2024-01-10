@@ -17,16 +17,60 @@ const static uint32_t SERVER_NODE_ID = 0;
 const static uint32_t ANY_NODE_ID = UINT32_MAX;
 
 struct EndpointInfo {
-    ibv_gid gid;
-    uint16_t lid;
-    uint32_t qp_num;
+    ibv_gid     gid;
+    uint16_t    lid;
+    uint32_t    qp_num;
+    uint32_t    reserve[2];
+
+    template <class T> void DecodeFrom(std::vector<T> &buf) { 
+        return DecodeFrom((EndpointInfo *) buf.data()); 
+    }
+
+    void DecodeFrom(EndpointInfo *buf) {
+        LOG_ASSERT(buf);
+        memcpy(&gid, &buf->gid, sizeof(ibv_gid));
+        lid = le16toh(buf->lid);
+        qp_num = le32toh(buf->qp_num);
+    }
+
+    EndpointInfo EncodeTo() const {
+        EndpointInfo buf;
+        memcpy(&buf.gid, &gid, sizeof(ibv_gid));
+        buf.lid = htole16(lid);
+        buf.qp_num = htole32(qp_num);
+        return buf;
+    }
 };
 
 struct MemoryRegionInfo {
-    void *addr;
-    size_t length;
-    int access;
-    uint32_t rkey;
+    uint32_t    node_id;    // [node_id, addr] identify an unique memory region
+    uint32_t    access;     // permission bits
+    uint64_t    addr;
+    uint64_t    length;
+    uint32_t    rkey;
+
+    template <class T> void DecodeFrom(std::vector<T> &buf) { 
+        return DecodeFrom((MemoryRegionInfo *) buf.data()); 
+    }
+
+    void DecodeFrom(MemoryRegionInfo *buf) {
+        LOG_ASSERT(buf);
+        node_id = le32toh(buf->node_id);
+        access = le32toh(buf->access);
+        addr = le64toh(buf->addr);
+        length = le64toh(buf->length);
+        rkey = le32toh(buf->rkey);
+    }
+
+    MemoryRegionInfo EncodeTo() const {
+        MemoryRegionInfo buf;
+        buf.node_id = htole32(node_id);
+        buf.access = htole32(access);
+        buf.addr = htole64(addr);
+        buf.length = htole64(length);
+        buf.rkey = htole32(rkey);
+        return buf;
+    }
 };
 
 class ConnMgmtServer {
@@ -37,20 +81,20 @@ public:
 
     int Listen(uint16_t tcp_port);
 
-    int RunEventLoop();
+    int ProcessEvents();
 
     void Close();
 
-    uint32_t GetLocalNodeID() const { return SERVER_NODE_ID; }
-
     int RegisterMemoryRegion(const MemoryRegionInfo &mr);
 
-    int ListMemoryRegions(uint32_t node_id, std::vector<MemoryRegionInfo> &mr_list);
+    int ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list);
 
 protected:
-    virtual void OnCloseConnection(uint32_t node_id) { }
+    virtual void OnNewConnection(int fd) { }
 
-    virtual int OnEstablishRC(uint32_t node_id, const EndpointInfo &request, EndpointInfo &response)  { 
+    virtual void OnCloseConnection(int fd) { }
+
+    virtual int OnEstablishRC(int fd, const EndpointInfo &request, EndpointInfo &response)  { 
         return -1; 
     }
 
@@ -58,16 +102,8 @@ private:
     int ProcessMessage(int conn_fd);
 
 private:
-    struct NodeInfo {
-        int fd;
-        std::map<void *, MemoryRegionInfo> mr_map;
-    };
-
-    uint32_t next_node_id_;
-
     std::mutex mutex_;
-    std::map<int, uint32_t> fd2node_map_;
-    std::map<uint32_t, NodeInfo> node_map_;
+    std::vector<MemoryRegionInfo> mr_list_;
 
     int listen_fd_;
     std::vector<pollfd> poll_fd_;
@@ -83,17 +119,14 @@ public:
 
     void Close();
 
-    uint32_t GetLocalNodeID() const { return local_node_id_; }
-
     int EstablishRC(const EndpointInfo &request, EndpointInfo &response);
 
     int RegisterMemoryRegion(const MemoryRegionInfo &mr);
 
-    int ListMemoryRegions(uint32_t node_id, std::vector<MemoryRegionInfo> &mr_list);
+    int ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list);
 
 private:
     int conn_fd_;
-    uint32_t local_node_id_;
 };
 
 #endif // CONNECTION_MANAGER_H
