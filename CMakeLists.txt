@@ -9,5 +9,5 @@ include_directories(include)
 add_library(librdma src/rdma_resources.cpp src/rdma_endpoint.cpp src/connection_manager.cpp)
 target_link_libraries(librdma PUBLIC ibverbs glog gflags pthread)
 
-add_executable(rdma_resources_test test/rdma_resources_test.cpp)
-target_link_libraries(rdma_resources_test PUBLIC librdma gtest)
+add_subdirectory(example)
+add_subdirectory(test)

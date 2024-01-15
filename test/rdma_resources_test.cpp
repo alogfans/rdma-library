@@ -63,14 +63,14 @@ TEST(rdma_resources, basic_test) {
 TEST(rdma_resources, connection_manager_test) {
     std::atomic<bool> running(true);
     std::thread server_func([&]{
-        ConnMgmtServer server;
+        ConnectionManager server;
         ASSERT_FALSE(server.Listen(12345));
         while (running) {
             ASSERT_FALSE(server.ProcessEvents());
         }
         server.Close();
     });
-    ConnMgmtClient client[5];
+    ConnectionClient client[5];
     for (int i = 0; i < 5; ++i) {
         ASSERT_FALSE(client[i].Connect("localhost", 12345));
         MemoryRegionInfo info;

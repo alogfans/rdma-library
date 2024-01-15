@@ -19,8 +19,8 @@ const static uint32_t ANY_NODE_ID = UINT32_MAX;
 struct EndpointInfo {
     ibv_gid     gid;
     uint16_t    lid;
+    uint16_t    reserve;
     uint32_t    qp_num;
-    uint32_t    reserve[2];
 
     template <class T> void DecodeFrom(std::vector<T> &buf) { 
         return DecodeFrom((EndpointInfo *) buf.data()); 
@@ -31,6 +31,7 @@ struct EndpointInfo {
         memcpy(&gid, &buf->gid, sizeof(ibv_gid));
         lid = le16toh(buf->lid);
         qp_num = le32toh(buf->qp_num);
+        reserve = 0;
     }
 
     EndpointInfo EncodeTo() const {
@@ -38,6 +39,7 @@ struct EndpointInfo {
         memcpy(&buf.gid, &gid, sizeof(ibv_gid));
         buf.lid = htole16(lid);
         buf.qp_num = htole32(qp_num);
+        buf.reserve = 0;
         return buf;
     }
 };
@@ -73,11 +75,11 @@ struct MemoryRegionInfo {
     }
 };
 
-class ConnMgmtServer {
+class ConnectionManager {
 public:
-    ConnMgmtServer();
+    ConnectionManager();
 
-    virtual ~ConnMgmtServer();
+    virtual ~ConnectionManager();
 
     int Listen(uint16_t tcp_port);
 
@@ -109,11 +111,11 @@ private:
     std::vector<pollfd> poll_fd_;
 };
 
-class ConnMgmtClient {
+class ConnectionClient {
 public:
-    ConnMgmtClient();
+    ConnectionClient();
 
-    ~ConnMgmtClient();
+    ~ConnectionClient();
 
     int Connect(const char *hostname, uint16_t tcp_port);
 

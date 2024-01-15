@@ -1,0 +1,2 @@
+add_executable(rdma_resources_test rdma_resources_test.cpp)
+target_link_libraries(rdma_resources_test PUBLIC librdma gtest)

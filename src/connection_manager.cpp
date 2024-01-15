@@ -10,15 +10,15 @@
 #include <sys/poll.h>
 #include <arpa/inet.h>
 
-ConnMgmtServer::ConnMgmtServer() : listen_fd_(-1) { }
+ConnectionManager::ConnectionManager() : listen_fd_(-1) { }
 
-ConnMgmtServer::~ConnMgmtServer() {
+ConnectionManager::~ConnectionManager() {
     if (!poll_fd_.empty()) {
         Close();
     }
 }
 
-int ConnMgmtServer::Listen(uint16_t tcp_port) {
+int ConnectionManager::Listen(uint16_t tcp_port) {
     sockaddr_in bind_address;
     int on = 1, fd = -1;
     memset(&bind_address, 0, sizeof(sockaddr_in));
@@ -27,7 +27,7 @@ int ConnMgmtServer::Listen(uint16_t tcp_port) {
     bind_address.sin_addr.s_addr = INADDR_ANY;
 
     if (!poll_fd_.empty()) {
-        LOG(ERROR) << "ConnMgmtServer has been started";
+        LOG(ERROR) << "ConnectionManager has been started";
         return -1;
     }
 
@@ -60,9 +60,9 @@ int ConnMgmtServer::Listen(uint16_t tcp_port) {
     return 0;
 }
 
-int ConnMgmtServer::ProcessEvents() {
+int ConnectionManager::ProcessEvents() {
     if (poll_fd_.empty()) {
-        LOG(ERROR) << "ConnMgmtServer is not started";
+        LOG(ERROR) << "ConnectionManager is not started";
         return -1;
     }
 
@@ -132,7 +132,7 @@ int ConnMgmtServer::ProcessEvents() {
     return 0;
 }
 
-void ConnMgmtServer::Close() {
+void ConnectionManager::Close() {
     for (auto &entry : poll_fd_) {
         close(entry.fd);
     }
@@ -140,27 +140,29 @@ void ConnMgmtServer::Close() {
     listen_fd_ = -1;
 }
 
-int ConnMgmtServer::RegisterMemoryRegion(const MemoryRegionInfo &mr) {
+int ConnectionManager::RegisterMemoryRegion(const MemoryRegionInfo &mr) {
     mutex_.lock();
     mr_list_.push_back(mr);
     mutex_.unlock();
     return 0;
 }
 
-int ConnMgmtServer::ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list) {
+int ConnectionManager::ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list) {
     mutex_.lock();
     mr_list = mr_list_;
     mutex_.unlock();
     return 0;
 }
 
-int ConnMgmtServer::ProcessMessage(int conn_fd) {
+int ConnectionManager::ProcessMessage(int conn_fd) {
     uint8_t opcode;
     std::vector<char> payload_buffer;
 
     if (RecvMessage(conn_fd, opcode, payload_buffer)) {
         if (errno) {
             PLOG(ERROR) << "Failed to receive message";
+        } else {
+            PLOG(ERROR) << "Unexpected EOF";
         }
         return -1;
     }
@@ -221,6 +223,11 @@ int ConnMgmtServer::ProcessMessage(int conn_fd) {
         }
         break;
     }
+    case OOB_CTRL_OP_CLOSE:
+    {
+        // Close the connection gracefully
+        return -1;
+    }
     
     default:
         LOG(ERROR) << "Unsupported opcode: " << opcode;
@@ -230,15 +237,15 @@ int ConnMgmtServer::ProcessMessage(int conn_fd) {
     return 0;
 }
 
-ConnMgmtClient::ConnMgmtClient() : conn_fd_(-1) { }
+ConnectionClient::ConnectionClient() : conn_fd_(-1) { }
 
-ConnMgmtClient::~ConnMgmtClient() {
+ConnectionClient::~ConnectionClient() {
     if (conn_fd_ >= 0) {
         Close();
     }
 }
 
-int ConnMgmtClient::Connect(const char *hostname, uint16_t tcp_port) {
+int ConnectionClient::Connect(const char *hostname, uint16_t tcp_port) {
     int on = 1;
     struct addrinfo hints;
     struct addrinfo *result, *rp;
@@ -278,14 +285,17 @@ int ConnMgmtClient::Connect(const char *hostname, uint16_t tcp_port) {
     return 0;
 }
 
-void ConnMgmtClient::Close() {
+void ConnectionClient::Close() {
     if (conn_fd_) {
+        if (SendMessage(conn_fd_, OOB_CTRL_OP_CLOSE)) {
+            PLOG(ERROR) << "Failed to send message";
+        }
         close(conn_fd_);
         conn_fd_ = -1;
     }
 }
 
-int ConnMgmtClient::EstablishRC(const EndpointInfo &request, EndpointInfo &response) {
+int ConnectionClient::EstablishRC(const EndpointInfo &request, EndpointInfo &response) {
     std::vector<EndpointInfo> request_list, response_list;
     request_list.push_back(request.EncodeTo());
     if (SendMessage(conn_fd_, OOB_CTRL_OP_ESTABLISH_RC, request_list)) {
@@ -305,7 +315,7 @@ int ConnMgmtClient::EstablishRC(const EndpointInfo &request, EndpointInfo &respo
     return 0;
 }
 
-int ConnMgmtClient::RegisterMemoryRegion(const MemoryRegionInfo &mr) {
+int ConnectionClient::RegisterMemoryRegion(const MemoryRegionInfo &mr) {
     std::vector<MemoryRegionInfo> request_list;
     request_list.push_back(mr.EncodeTo());
     if (SendMessage(conn_fd_, OOB_CTRL_OP_REG_MR, request_list)) {
@@ -324,7 +334,7 @@ int ConnMgmtClient::RegisterMemoryRegion(const MemoryRegionInfo &mr) {
     return 0;
 }
 
-int ConnMgmtClient::ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list) {
+int ConnectionClient::ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list) {
     std::vector<MemoryRegionInfo> response_list;
     if (SendMessage(conn_fd_, OOB_CTRL_OP_LIST_MR)) {
         PLOG(ERROR) << "Failed to send message";
