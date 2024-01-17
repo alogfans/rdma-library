@@ -50,6 +50,7 @@ struct MemoryRegionInfo {
     uint64_t    addr;
     uint64_t    length;
     uint32_t    rkey;
+    uint32_t    reserve;
 
     template <class T> void DecodeFrom(std::vector<T> &buf) { 
         return DecodeFrom((MemoryRegionInfo *) buf.data()); 
@@ -62,6 +63,7 @@ struct MemoryRegionInfo {
         addr = le64toh(buf->addr);
         length = le64toh(buf->length);
         rkey = le32toh(buf->rkey);
+        reserve = 0;
     }
 
     MemoryRegionInfo EncodeTo() const {
@@ -71,6 +73,7 @@ struct MemoryRegionInfo {
         buf.addr = htole64(addr);
         buf.length = htole64(length);
         buf.rkey = htole32(rkey);
+        buf.reserve = 0;
         return buf;
     }
 };

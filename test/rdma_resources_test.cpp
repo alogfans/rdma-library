@@ -4,6 +4,7 @@
 #include "rdma_resources.h"
 #include "rdma_endpoint.h"
 #include "connection_manager.h"
+#include "memory_pool.h"
 
 #include <thread>
 #include <gtest/gtest.h>
@@ -19,21 +20,21 @@ TEST(rdma_resources, basic_test) {
         memset(pool[i], 0, kMemoryPoolSize);
         key_list[i] = RegisterRdmaMemoryRegion(pool[i], kMemoryPoolSize, 
                       IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
-        ASSERT_TRUE(key_list[i].IsValid());
+        EXPECT_TRUE(key_list[i].IsValid());
     }
     for (int i = 0; i < 2; ++i) {
         auto key = GetRdmaMemoryRegion(pool[i]);
-        ASSERT_TRUE(key == key_list[i]);
+        EXPECT_TRUE(key == key_list[i]);
         key = GetRdmaMemoryRegion((char *) pool[i] + kMemoryPoolSize / 2);
-        ASSERT_TRUE(key == key_list[i]);
+        EXPECT_TRUE(key == key_list[i]);
         key = GetRdmaMemoryRegion((char *) pool[i] + kMemoryPoolSize - 1);
-        ASSERT_TRUE(key == key_list[i]);
+        EXPECT_TRUE(key == key_list[i]);
         key = GetRdmaMemoryRegion((char *) pool[i] + kMemoryPoolSize);
-        ASSERT_TRUE(!key.IsValid());
+        EXPECT_TRUE(!key.IsValid());
         key = GetRdmaMemoryRegion((char *) pool[i] + kMemoryPoolSize + 1);
-        ASSERT_TRUE(!key.IsValid());
+        EXPECT_TRUE(!key.IsValid());
         key = GetRdmaMemoryRegion((char *) pool[i] - 1);
-        ASSERT_TRUE(!key.IsValid());
+        EXPECT_TRUE(!key.IsValid());
     }
 
     RdmaEndpoint ep[2];
@@ -52,7 +53,7 @@ TEST(rdma_resources, basic_test) {
     while (wc_list.empty()) {
         ASSERT_FALSE(ep[0].PollCQ(wc_list));
     }
-    ASSERT_TRUE(strcmp(pool[1], "Hello world!") == 0);
+    EXPECT_TRUE(strcmp(pool[1], "Hello world!") == 0);
     for (int i = 0; i < 2; ++i) {
         DeregisterRdmaMemoryRegion(pool[i]);
         free(pool[i]);
@@ -94,6 +95,19 @@ TEST(rdma_resources, connection_manager_test) {
     }
     running.store(false);
     server_func.join();
+}
+
+TEST(rdma_resources, memory_test) {
+    ASSERT_TRUE(!InitializeMemoryPool());
+    void *ptr = AllocateMemory(13);
+    EXPECT_TRUE(ptr != nullptr);
+    memcpy(ptr, "hello world!", 13);
+    void *ptr2 = AllocateMemory(13);
+    EXPECT_TRUE(ptr != ptr2 && ptr2 != nullptr);
+    for (int i = 0; i < 1000000; ++i) {
+        EXPECT_TRUE(AllocateMemory(13));
+    }
+    DestroyMemoryPool();
 }
 
 int main(int argc, char **argv) {
