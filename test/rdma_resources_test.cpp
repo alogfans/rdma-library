@@ -5,6 +5,7 @@
 #include "rdma_endpoint.h"
 #include "connection_manager.h"
 #include "memory_pool.h"
+#include "executor.h"
 
 #include <thread>
 #include <gtest/gtest.h>
@@ -108,6 +109,39 @@ TEST(rdma_resources, memory_test) {
         EXPECT_TRUE(AllocateMemory(13));
     }
     DestroyMemoryPool();
+}
+
+std::mutex coutMtx;  // protect std::cout
+
+void task(int taskId) {    
+    {
+        std::lock_guard<std::mutex> guard(coutMtx);
+        std::cout << "task-" << taskId << " begin!" << std::endl;                    
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    {
+        std::lock_guard<std::mutex> guard(coutMtx);
+        std::cout << "task-" << taskId << " end!" << std::endl;        
+    }
+}
+
+void monitor(const ThreadPool &pool, int seconds) {
+    for (int i = 1; i < seconds * 10; ++i) {
+        {
+            std::lock_guard<std::mutex> guard(coutMtx);
+            std::cout << "thread num: " << pool.GetThreadCount() << std::endl;                    
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));            
+    }
+}
+
+TEST(rdma_resources, thread_pool_test) {
+    ThreadPool pool;
+    pool.SubmitTask(monitor, std::ref(pool), 13);
+    for (int taskId = 0; taskId < 10; ++taskId) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        pool.SubmitTask(task, taskId);
+    }
 }
 
 int main(int argc, char **argv) {

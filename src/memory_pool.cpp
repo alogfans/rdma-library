@@ -31,12 +31,15 @@ static const size_t KB = 1024;
 static const size_t MB = 1024 * 1024;
 static const size_t kSegmentSize = 64 * MB;
 static const int kNumOfClasses = 17;
-static const size_t kClassIdToBlockSize[kNumOfClasses] = {
+static constexpr size_t kClassIdToBlockSize[kNumOfClasses] = {
     1 * KB, 2 * KB, 4 * KB, 8 * KB, 16 * KB, 
     32 * KB, 64 * KB, 128 * KB, 256 * KB, 512 * KB,
     1 * MB, 2 * MB, 4 * MB, 8 * MB, 16 * MB, 
     32 * MB, 64 * MB
 };
+
+static_assert(kSegmentSize == kMaxBlockSize, "");
+static_assert(kSegmentSize == kClassIdToBlockSize[kNumOfClasses - 1], "");
 
 struct FreeBlock {
     FreeBlock *next;

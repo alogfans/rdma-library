@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstddef>
 
+static const size_t kMaxBlockSize = 64 * 1024 * 1024;
+
 int InitializeMemoryPool();
 
 void DestroyMemoryPool();
