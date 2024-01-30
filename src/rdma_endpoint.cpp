@@ -50,12 +50,11 @@ int CompletionQueue::RequestNotify()
     return 0;
 }
 
-int CompletionQueue::Poll(std::vector<ibv_wc> &wc_list)
+int CompletionQueue::Poll(std::vector<ibv_wc> &wc_list, size_t max_count)
 {
     LOG_ASSERT(IsAvailable());
-    const static size_t kArrayCapacity = 16;
-    wc_list.resize(kArrayCapacity);
-    int nr_poll = ibv_poll_cq(cq_, kArrayCapacity, wc_list.data());
+    wc_list.resize(max_count);
+    int nr_poll = ibv_poll_cq(cq_, max_count, wc_list.data());
     if (nr_poll < 0)
     {
         PLOG(ERROR) << "Failed to poll CQ";

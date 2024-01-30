@@ -79,7 +79,7 @@ public:
 
     int RequestNotify();
 
-    int Poll(std::vector<ibv_wc> &wc_list);
+    int Poll(std::vector<ibv_wc> &wc_list, size_t max_count = 16);
 
     bool IsAvailable() const { return cq_ != nullptr; }
 

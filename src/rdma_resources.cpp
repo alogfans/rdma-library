@@ -28,6 +28,7 @@ DEFINE_string(rdma_device, "", "The name of the HCA device used "
                                "(Empty means using the first active device)");
 DEFINE_int32(rdma_port, 1, "The port number to use. For RoCE, it is always 1.");
 DEFINE_int32(rdma_gid_index, 1, "The GID index to use.");
+DEFINE_bool(rdma_local_mr_rwlock, false, "Enable rwlock of local memory region.");
 
 struct ReverseComparator
 {
@@ -63,106 +64,6 @@ static std::atomic<int> g_comp_vector_index(0);
 static std::atomic<bool> g_rdma_available(false);
 static OnReceiveAsyncEventCallback g_on_receive_async_event_callback;
 static OnReceiveWorkCompletionCallback g_on_receive_work_completion_callback;
-
-static const char *IbvAsyncEventTypeToString(ibv_event_type event_type)
-{
-    switch (event_type)
-    {
-    case IBV_EVENT_CQ_ERR:
-        return "IBV_EVENT_CQ_ERR";
-    case IBV_EVENT_QP_FATAL:
-        return "IBV_EVENT_QP_FATAL";
-    case IBV_EVENT_QP_REQ_ERR:
-        return "IBV_EVENT_QP_REQ_ERR";
-    case IBV_EVENT_QP_ACCESS_ERR:
-        return "IBV_EVENT_QP_ACCESS_ERR";
-    case IBV_EVENT_COMM_EST:
-        return "IBV_EVENT_COMM_EST";
-    case IBV_EVENT_SQ_DRAINED:
-        return "IBV_EVENT_SQ_DRAINED";
-    case IBV_EVENT_PATH_MIG:
-        return "IBV_EVENT_PATH_MIG";
-    case IBV_EVENT_PATH_MIG_ERR:
-        return "IBV_EVENT_PATH_MIG_ERR";
-    case IBV_EVENT_DEVICE_FATAL:
-        return "IBV_EVENT_DEVICE_FATAL";
-    case IBV_EVENT_PORT_ACTIVE:
-        return "IBV_EVENT_PORT_ACTIVE";
-    case IBV_EVENT_PORT_ERR:
-        return "IBV_EVENT_PORT_ERR";
-    case IBV_EVENT_LID_CHANGE:
-        return "IBV_EVENT_LID_CHANGE";
-    case IBV_EVENT_PKEY_CHANGE:
-        return "IBV_EVENT_PKEY_CHANGE";
-    case IBV_EVENT_SM_CHANGE:
-        return "IBV_EVENT_SM_CHANGE";
-    case IBV_EVENT_SRQ_ERR:
-        return "IBV_EVENT_SRQ_ERR";
-    case IBV_EVENT_SRQ_LIMIT_REACHED:
-        return "IBV_EVENT_SRQ_LIMIT_REACHED";
-    case IBV_EVENT_QP_LAST_WQE_REACHED:
-        return "IBV_EVENT_QP_LAST_WQE_REACHED";
-    case IBV_EVENT_CLIENT_REREGISTER:
-        return "IBV_EVENT_CLIENT_REREGISTER";
-    case IBV_EVENT_GID_CHANGE:
-        return "IBV_EVENT_GID_CHANGE";
-    default:
-        return "UNKNOWN";
-    }
-}
-
-static const char *IbvWcStatusToString(ibv_wc_status status)
-{
-    switch (status)
-    {
-    case IBV_WC_SUCCESS:
-        return "IBV_WC_SUCCESS";
-    case IBV_WC_LOC_LEN_ERR:
-        return "IBV_WC_LOC_LEN_ERR";
-    case IBV_WC_LOC_QP_OP_ERR:
-        return "IBV_WC_LOC_QP_OP_ERR";
-    case IBV_WC_LOC_EEC_OP_ERR:
-        return "IBV_WC_LOC_EEC_OP_ERR";
-    case IBV_WC_LOC_PROT_ERR:
-        return "IBV_WC_LOC_PROT_ERR";
-    case IBV_WC_WR_FLUSH_ERR:
-        return "IBV_WC_WR_FLUSH_ERR";
-    case IBV_WC_MW_BIND_ERR:
-        return "IBV_WC_MW_BIND_ERR";
-    case IBV_WC_BAD_RESP_ERR:
-        return "IBV_WC_BAD_RESP_ERR";
-    case IBV_WC_LOC_ACCESS_ERR:
-        return "IBV_WC_LOC_ACCESS_ERR";
-    case IBV_WC_REM_INV_REQ_ERR:
-        return "IBV_WC_REM_INV_REQ_ERR";
-    case IBV_WC_REM_ACCESS_ERR:
-        return "IBV_WC_REM_ACCESS_ERR";
-    case IBV_WC_REM_OP_ERR:
-        return "IBV_WC_REM_OP_ERR";
-    case IBV_WC_RETRY_EXC_ERR:
-        return "IBV_WC_RETRY_EXC_ERR";
-    case IBV_WC_RNR_RETRY_EXC_ERR:
-        return "IBV_WC_RNR_RETRY_EXC_ERR";
-    case IBV_WC_LOC_RDD_VIOL_ERR:
-        return "IBV_WC_LOC_RDD_VIOL_ERR";
-    case IBV_WC_REM_INV_RD_REQ_ERR:
-        return "IBV_WC_REM_INV_RD_REQ_ERR";
-    case IBV_WC_REM_ABORT_ERR:
-        return "IBV_WC_REM_ABORT_ERR";
-    case IBV_WC_INV_EECN_ERR:
-        return "IBV_WC_INV_EECN_ERR";
-    case IBV_WC_INV_EEC_STATE_ERR:
-        return "IBV_WC_INV_EEC_STATE_ERR";
-    case IBV_WC_FATAL_ERR:
-        return "IBV_WC_FATAL_ERR";
-    case IBV_WC_RESP_TIMEOUT_ERR:
-        return "IBV_WC_RESP_TIMEOUT_ERR";
-    case IBV_WC_GENERAL_ERR:
-        return "IBV_WC_GENERAL_ERR";
-    default:
-        return "UNKNOWN";
-    }
-}
 
 static ibv_context *OpenRdmaDevice()
 {
@@ -384,13 +285,15 @@ MemoryRegionKey GetRdmaMemoryRegion(void *buf)
 {
     LOG_ASSERT(IsRdmaAvailable());
     ibv_mr *mr = nullptr;
-    pthread_rwlock_rdlock(&g_rdma_resource->rwlock);
+    if (FLAGS_rdma_local_mr_rwlock)
+        pthread_rwlock_rdlock(&g_rdma_resource->rwlock);
     auto iter = g_rdma_resource->memory_regions.lower_bound(buf);
     if (iter != g_rdma_resource->memory_regions.end())
     {
         mr = iter->second;
     }
-    pthread_rwlock_unlock(&g_rdma_resource->rwlock);
+    if (FLAGS_rdma_local_mr_rwlock)
+        pthread_rwlock_unlock(&g_rdma_resource->rwlock);
     if (mr && mr->addr <= buf && buf < (void *)((intptr_t(mr->addr) + mr->length)))
     {
         return {mr->lkey, mr->rkey};
@@ -496,7 +399,7 @@ static int ProcessContextEvent()
             }
             break; // There is no available context async event
         }
-        LOG(INFO) << "Received context async event: " << IbvAsyncEventTypeToString(event.event_type);
+        LOG(INFO) << "Received context async event: " << ibv_event_type_str(event.event_type);
         if (g_on_receive_async_event_callback)
         {
             g_on_receive_async_event_callback(event);
@@ -541,7 +444,7 @@ static void ProcessWorkCompletion(struct ibv_wc &wc)
 {
     if (wc.status != IBV_WC_SUCCESS)
     {
-        LOG(ERROR) << "Work completion error: " << IbvWcStatusToString(wc.status)
+        LOG(ERROR) << "Work completion error: " << ibv_wc_status_str(wc.status)
                    << " (" << wc.status << "), vendor error: " << wc.vendor_err;
     }
     if (g_on_receive_work_completion_callback)

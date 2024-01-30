@@ -112,6 +112,7 @@ protected:
 
     virtual int OnEstablishRC(int fd, const EndpointInfo &request, EndpointInfo &response)
     {
+        LOG(WARNING) << "Unspecified establishment implementation";
         return -1;
     }
 

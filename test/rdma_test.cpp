@@ -40,18 +40,18 @@ TEST(rdma_resources, basic_test)
     }
 
     CompletionQueue cq[2];
-    QueuePair ep[2];
+    QueuePair qp[2];
     uint32_t qp_num[2];
-    ASSERT_FALSE(ep[0].Create(cq[0]));
-    ASSERT_FALSE(ep[1].Create(cq[1]));
-    qp_num[0] = ep[0].GetQPNum();
-    qp_num[1] = ep[1].GetQPNum();
-    ASSERT_FALSE(ep[0].SetupRC(GetRdmaGid(), GetRdmaLid(), qp_num[1]));
-    ASSERT_FALSE(ep[1].SetupRC(GetRdmaGid(), GetRdmaLid(), qp_num[0]));
+    ASSERT_FALSE(qp[0].Create(cq[0]));
+    ASSERT_FALSE(qp[1].Create(cq[1]));
+    qp_num[0] = qp[0].GetQPNum();
+    qp_num[1] = qp[1].GetQPNum();
+    ASSERT_FALSE(qp[0].SetupRC(GetRdmaGid(), GetRdmaLid(), qp_num[1]));
+    ASSERT_FALSE(qp[1].SetupRC(GetRdmaGid(), GetRdmaLid(), qp_num[0]));
     SendWRList send_wr;
     strcpy(pool[0], "Hello world!");
     ASSERT_FALSE(send_wr.Write(pool[0], (uint64_t)pool[1], key_list[1].rkey, 13));
-    ASSERT_FALSE(ep[0].PostSend(send_wr));
+    ASSERT_FALSE(qp[0].PostSend(send_wr));
     std::vector<ibv_wc> wc_list;
     while (wc_list.empty())
     {
