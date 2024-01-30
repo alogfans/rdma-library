@@ -16,17 +16,21 @@
 const static uint32_t SERVER_NODE_ID = 0;
 const static uint32_t ANY_NODE_ID = UINT32_MAX;
 
-struct EndpointInfo {
-    ibv_gid     gid;
-    uint16_t    lid;
-    uint16_t    reserve;
-    uint32_t    qp_num;
+struct EndpointInfo
+{
+    ibv_gid gid;
+    uint16_t lid;
+    uint16_t reserve;
+    uint32_t qp_num;
 
-    template <class T> void DecodeFrom(std::vector<T> &buf) { 
-        return DecodeFrom((EndpointInfo *) buf.data()); 
+    template <class T>
+    void DecodeFrom(std::vector<T> &buf)
+    {
+        return DecodeFrom((EndpointInfo *)buf.data());
     }
 
-    void DecodeFrom(EndpointInfo *buf) {
+    void DecodeFrom(EndpointInfo *buf)
+    {
         LOG_ASSERT(buf);
         memcpy(&gid, &buf->gid, sizeof(ibv_gid));
         lid = le16toh(buf->lid);
@@ -34,7 +38,8 @@ struct EndpointInfo {
         reserve = 0;
     }
 
-    EndpointInfo EncodeTo() const {
+    EndpointInfo EncodeTo() const
+    {
         EndpointInfo buf;
         memcpy(&buf.gid, &gid, sizeof(ibv_gid));
         buf.lid = htole16(lid);
@@ -44,19 +49,23 @@ struct EndpointInfo {
     }
 };
 
-struct MemoryRegionInfo {
-    uint32_t    node_id;    // [node_id, addr] identify an unique memory region
-    uint32_t    access;     // permission bits
-    uint64_t    addr;
-    uint64_t    length;
-    uint32_t    rkey;
-    uint32_t    reserve;
+struct MemoryRegionInfo
+{
+    uint32_t node_id; // [node_id, addr] identify an unique memory region
+    uint32_t access;  // permission bits
+    uint64_t addr;
+    uint64_t length;
+    uint32_t rkey;
+    uint32_t reserve;
 
-    template <class T> void DecodeFrom(std::vector<T> &buf) { 
-        return DecodeFrom((MemoryRegionInfo *) buf.data()); 
+    template <class T>
+    void DecodeFrom(std::vector<T> &buf)
+    {
+        return DecodeFrom((MemoryRegionInfo *)buf.data());
     }
 
-    void DecodeFrom(MemoryRegionInfo *buf) {
+    void DecodeFrom(MemoryRegionInfo *buf)
+    {
         LOG_ASSERT(buf);
         node_id = le32toh(buf->node_id);
         access = le32toh(buf->access);
@@ -66,7 +75,8 @@ struct MemoryRegionInfo {
         reserve = 0;
     }
 
-    MemoryRegionInfo EncodeTo() const {
+    MemoryRegionInfo EncodeTo() const
+    {
         MemoryRegionInfo buf;
         buf.node_id = htole32(node_id);
         buf.access = htole32(access);
@@ -78,7 +88,8 @@ struct MemoryRegionInfo {
     }
 };
 
-class ConnectionManager {
+class ConnectionManager
+{
 public:
     ConnectionManager();
 
@@ -95,12 +106,13 @@ public:
     int ListMemoryRegions(std::vector<MemoryRegionInfo> &mr_list);
 
 protected:
-    virtual void OnNewConnection(int fd) { }
+    virtual void OnNewConnection(int fd) {}
 
-    virtual void OnCloseConnection(int fd) { }
+    virtual void OnCloseConnection(int fd) {}
 
-    virtual int OnEstablishRC(int fd, const EndpointInfo &request, EndpointInfo &response)  { 
-        return -1; 
+    virtual int OnEstablishRC(int fd, const EndpointInfo &request, EndpointInfo &response)
+    {
+        return -1;
     }
 
 private:
@@ -114,7 +126,8 @@ private:
     std::vector<pollfd> poll_fd_;
 };
 
-class ConnectionClient {
+class ConnectionClient
+{
 public:
     ConnectionClient();
 

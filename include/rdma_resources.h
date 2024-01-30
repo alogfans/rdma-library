@@ -8,10 +8,17 @@
 #include <gflags/gflags.h>
 #include <infiniband/verbs.h>
 
-struct MemoryRegionKey {
+#include <functional>
+
+using OnReceiveAsyncEventCallback = std::function<void(struct ibv_async_event &)>;
+using OnReceiveWorkCompletionCallback = std::function<void(struct ibv_wc &)>;
+
+struct MemoryRegionKey
+{
     MemoryRegionKey(uint32_t lkey = 0, uint32_t rkey = 0) : lkey(lkey), rkey(rkey) {}
 
-    bool operator==(const MemoryRegionKey &rhs) const { 
+    bool operator==(const MemoryRegionKey &rhs) const
+    {
         return (lkey == rhs.lkey && rkey == rhs.rkey);
     }
 
@@ -47,6 +54,10 @@ uint16_t GetRdmaLid();
 
 bool IsRdmaAvailable();
 
-int ProcessEvents();
+void RegisterOnReceiveAsyncEventCallback(OnReceiveAsyncEventCallback &&callback);
+
+void RegisterOnReceiveWorkCompletionCallback(OnReceiveWorkCompletionCallback &&callback);
+
+int ProcessEvents(int timeout, bool notify_cq_on_demand);
 
 #endif // RDMA_RESOURCES_H

@@ -10,7 +10,7 @@ add_library(librdma src/rdma_resources.cpp
                     src/rdma_endpoint.cpp 
                     src/connection_manager.cpp 
                     src/memory_pool.cpp
-                    src/executor.cpp)
+                    src/async_executor.cpp)
 target_link_libraries(librdma PUBLIC ibverbs glog gflags pthread)
 
 add_subdirectory(example)

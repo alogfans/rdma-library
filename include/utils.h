@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <ctime>
 
-static int64_t GetCurrentTimeNanos() {
+static inline int64_t GetCurrentTimeNanos() {
     const int64_t kNanosPerSecond = 1000 * 1000 * 1000;
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts)) {

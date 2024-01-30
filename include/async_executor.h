@@ -1,4 +1,4 @@
-// executor.h
+// async_executor.h
 // Copyright (C) 2024 Feng Ren
 
 #ifndef EXECUTOR_H
@@ -14,13 +14,18 @@
 #include <vector>
 #include <queue>
 
-class ThreadPool {
+class ThreadPool
+{
     using Task = std::function<void()>;
 
 public:
     ThreadPool()
         : running_(true),
-          max_threads_(std::thread::hardware_concurrency()) { }
+          max_threads_(std::thread::hardware_concurrency()) {}
+
+    ThreadPool(size_t max_threads)
+        : running_(true),
+          max_threads_(max_threads) {}
 
     ~ThreadPool();
 
@@ -29,10 +34,11 @@ public:
     ThreadPool &operator=(const ThreadPool &) = delete;
 
     template <typename Func, typename... Args>
-    auto SubmitTask(Func &&func, Args &&...args) 
+    auto SubmitTask(Func &&func, Args &&...args)
         -> std::future<decltype(func(args...))>;
 
-    size_t GetThreadCount() const {
+    size_t GetThreadCount() const
+    {
         std::lock_guard<std::mutex> guard(mutex_);
         return current_threads_;
     }
@@ -53,25 +59,30 @@ private:
 };
 
 template <typename Func, typename... Args>
-auto ThreadPool::SubmitTask(Func &&func, Args &&...args) 
-    -> std::future<decltype(func(args...))> {
+auto ThreadPool::SubmitTask(Func &&func, Args &&...args)
+    -> std::future<decltype(func(args...))>
+{
     auto execute = std::bind(std::forward<Func>(func), std::forward<Args>(args)...);
 
     using ReturnType = typename std::result_of<Func(Args...)>::type;
     using PackagedTask = std::packaged_task<ReturnType()>;
 
-    auto task = std::make_shared<PackagedTask>(std::move(execute)); 
+    auto task = std::make_shared<PackagedTask>(std::move(execute));
     auto result = task->get_future();
 
     std::lock_guard<std::mutex> guard(mutex_);
-    task_queue_.emplace([task]() { (*task)(); });
-    if (idle_threads_ > 0) {
+    task_queue_.emplace([task]()
+                        { (*task)(); });
+    if (idle_threads_ > 0)
+    {
         condition_variable_.notify_one();
-    } else if (current_threads_ < max_threads_) {
+    }
+    else if (current_threads_ < max_threads_)
+    {
         std::thread thread(&ThreadPool::RunWorker, this);
         workers_[thread.get_id()] = std::move(thread);
         ++current_threads_;
-    }        
+    }
 
     return result;
 }
