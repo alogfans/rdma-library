@@ -64,6 +64,34 @@ int CompletionQueue::Poll(std::vector<ibv_wc> &wc_list, size_t max_count)
     return 0;
 }
 
+int CompletionQueue::Poll(size_t max_count)
+{
+    LOG_ASSERT(IsAvailable());
+    const static size_t kMaxWorkCompletionCapacity = 64;
+    ibv_wc wc_list[kMaxWorkCompletionCapacity];
+    int nr_poll = ibv_poll_cq(cq_, kMaxWorkCompletionCapacity, wc_list);
+    if (nr_poll < 0)
+    {
+        PLOG(ERROR) << "Failed to poll CQ";
+        return -1;
+    }
+    for (int i = 0; i < nr_poll; ++i)
+    {
+        auto &wc = wc_list[i];
+        if (wc.status != IBV_WC_SUCCESS)
+        {
+            LOG(ERROR) << "Work completion error: " << ibv_wc_status_str(wc.status)
+                       << " (" << wc.status << "), vendor error: " << wc.vendor_err;
+        }
+        if (wc.wr_id)
+        {
+            auto promise = reinterpret_cast<WorkPromise *>(wc.wr_id);
+            promise->done(&wc);
+        }
+    }
+    return 0;
+}
+
 QueuePair::QueuePair() : state_(STATE_INITIAL),
                          queue_pair_(nullptr) {}
 
@@ -208,26 +236,6 @@ int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
     return 0;
 }
 
-int QueuePair::PostSend(SendWRList &send_wr)
-{
-    if (GetState() != STATE_RC_ESTABLISHED)
-    {
-        LOG(ERROR) << "Endpoint is not in RC_ESTABLISHED state";
-        return -1;
-    }
-    if (send_wr.wr_list.empty())
-    {
-        LOG(WARNING) << "Skip to send empty work request";
-        return 0;
-    }
-    if (ibv_post_send(queue_pair_, send_wr.wr_list.data(), &send_wr.bad_wr))
-    {
-        PLOG(ERROR) << "Fail to post send work requests";
-        return -1;
-    }
-    return 0;
-}
-
 int QueuePair::PostRecv(ReceiveWRList &recv_wr)
 {
     if (GetState() != STATE_RC_ESTABLISHED)
@@ -277,19 +285,10 @@ void ReceiveWRList::Reset()
     sge_list.reserve(FLAGS_rdma_max_wr * FLAGS_rdma_max_sge);
 }
 
-int SendWRList::Add(ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, uint32_t rkey,
-                    size_t length, uint64_t compare_add, uint64_t swap)
+int FillSendWRList(ibv_send_wr *wr_list, ibv_sge *sge_list, size_t wr_list_pos, size_t sge_list_pos,
+                   ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, uint32_t rkey,
+                   size_t length, uint64_t compare_add, uint64_t swap)
 {
-    size_t wr_list_pos = wr_list.size();
-    size_t sge_list_pos = sge_list.size();
-    if (wr_list_pos >= wr_list.capacity() || sge_list_pos >= sge_list.capacity())
-    {
-        LOG(ERROR) << "WR and SGE capacity exceeded";
-        return -1;
-    }
-
-    wr_list.resize(wr_list_pos + 1);
-    sge_list.resize(sge_list_pos + 1);
     auto &wr = wr_list[wr_list_pos];
     auto &sge = sge_list[sge_list_pos];
 
@@ -304,7 +303,7 @@ int SendWRList::Add(ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, ui
     sge.length = length;
     sge.lkey = key.lkey;
 
-    wr.wr_id = 0; // next_wr_id.fetch_add(1);
+    // wr.wr_id = 0;
     wr.opcode = opcode;
     wr.num_sge = 1;
     wr.sg_list = &sge;
@@ -350,6 +349,25 @@ int SendWRList::Add(ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, ui
     return 0;
 }
 
+int SendWRList::Add(ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, uint32_t rkey,
+                    size_t length, uint64_t compare_add, uint64_t swap)
+{
+    size_t wr_list_pos = wr_list.size();
+    size_t sge_list_pos = sge_list.size();
+    if (wr_list_pos >= wr_list.capacity() || sge_list_pos >= sge_list.capacity())
+    {
+        LOG(ERROR) << "WR and SGE capacity exceeded";
+        return -1;
+    }
+
+    wr_list.resize(wr_list_pos + 1);
+    sge_list.resize(sge_list_pos + 1);
+    wr_list[wr_list_pos].wr_id = promise.done ? (uint64_t)(&promise) : 0;
+    return FillSendWRList(wr_list.data(), sge_list.data(), wr_list_pos, sge_list_pos,
+                          opcode, local, remote_addr, rkey,
+                          length, compare_add, swap);
+}
+
 int ReceiveWRList::Recv(void *local, size_t length)
 {
     size_t wr_list_pos = wr_list.size();
@@ -376,7 +394,7 @@ int ReceiveWRList::Recv(void *local, size_t length)
     sge.length = length;
     sge.lkey = key.lkey;
 
-    wr.wr_id = 0; // next_wr_id.fetch_add(1);
+    wr.wr_id = promise.done ? (uint64_t)(&promise) : 0;
     wr.num_sge = 1;
     wr.sg_list = &sge;
     wr.next = nullptr;

@@ -14,7 +14,7 @@ DEFINE_uint32(depth, 1, "Number of concurrent requests for each thread");
 DEFINE_uint32(block_size, 8, "Granularity for each request");
 DEFINE_uint32(duration, 10, "Test duration in seconds");
 DEFINE_uint32(qp_count, 1, "Number of QP count for multiplexing");
-DEFINE_string(operation, "read", "Operation type for benchmarking: read, write");
+DEFINE_uint32(read_percentage, 100, "Percentage of read operation [0-100]");
 
 const static size_t kMegaBytes = 1024 * 1024;
 
@@ -40,7 +40,6 @@ uint64_t rounddown(uint64_t a, uint64_t b)
         break;            \
     }
 
-template <int READ_PERCENTAGE>
 class Benchmark
 {
 public:
@@ -52,7 +51,6 @@ public:
 
     void Run()
     {
-        LOG(INFO) << "Start";
         struct timeval start_tv, end_tv;
         running_ = true;
         operation_count_ = 0;
@@ -94,28 +92,28 @@ private:
         size_t kSegmentSize = rounddown(FLAGS_memory_region_mb * kMegaBytes / FLAGS_threads, 4096);
         uint64_t remote_base = mr_info.addr + thread_id * kSegmentSize;
         std::mt19937 rnd;
-        std::uniform_int_distribution<uint64_t> dist(0, kSegmentSize / FLAGS_block_size - 1);
+        std::uniform_int_distribution<uint64_t> dist_offset(0, kSegmentSize / FLAGS_block_size - 1);
+        std::uniform_int_distribution<uint32_t> dist_percent(0, 99);
         QueuePair *qp = qp_list_[thread_id % qp_list_.size()];
         CompletionQueue *cq = cq_list_[thread_id % qp_list_.size()];
 
         pthread_barrier_wait(&barrier_);
         uint32_t inflight_wr_count = 0;
-        SendWRList wr_list;
-        while (running_)
+        SendWRFixedList<8> wr_list;
+        while (running_.load(std::memory_order_relaxed))
         {
             std::vector<ibv_wc> wc_list;
             if (inflight_wr_count < FLAGS_depth)
             {
                 char *local = local_base + (local_operation_count % FLAGS_depth) * storage_size;
-                uint64_t remote_addr = remote_base + uint64_t(FLAGS_block_size) * dist(rnd);
-                if (dist(rnd) % 100 < READ_PERCENTAGE)
+                uint64_t remote_addr = remote_base + uint64_t(FLAGS_block_size) * dist_offset(rnd);
+                wr_list.Reset();
+                if (dist_percent(rnd) < FLAGS_read_percentage)
                 {
-                    wr_list.Reset();
                     DIED_IF(wr_list.Read(local, remote_addr, mr_info.rkey, FLAGS_block_size));
                 }
                 else
                 {
-                    wr_list.Reset();
                     DIED_IF(wr_list.Write(local, remote_addr, mr_info.rkey, FLAGS_block_size));
                 }
                 DIED_IF(qp->PostSend(wr_list));
@@ -215,33 +213,15 @@ int main(int argc, char **argv)
 
     CompletionQueue cq[FLAGS_qp_count];
     QueuePair qp[FLAGS_qp_count];
+    Benchmark bench;
+
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
         CreateQPCQ(client, qp[i], cq[i]);
+        bench.AddEndPoint(&qp[i], &cq[i]);
     }
 
-    if (FLAGS_operation == "read")
-    {
-        Benchmark<100> bench;
-        for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
-        {
-            bench.AddEndPoint(&qp[i], &cq[i]);
-        }
-        bench.Run();
-    }
-    else if (FLAGS_operation == "write")
-    {
-        Benchmark<0> bench;
-        for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
-        {
-            bench.AddEndPoint(&qp[i], &cq[i]);
-        }
-        bench.Run();
-    }
-    else
-    {
-        LOG(ERROR) << "Unsupported operation " << FLAGS_operation;
-    }
+    bench.Run();
 
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {

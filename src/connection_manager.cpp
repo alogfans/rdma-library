@@ -330,6 +330,8 @@ int ConnectionClient::Connect(const char *hostname, uint16_t tcp_port)
     }
 
     freeaddrinfo(result);
+    if (conn_fd_ < 0)
+        return -1;
     LOG(INFO) << "Connected to " << hostname << ":" << tcp_port;
     return 0;
 }

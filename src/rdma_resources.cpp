@@ -447,7 +447,12 @@ static void ProcessWorkCompletion(struct ibv_wc &wc)
         LOG(ERROR) << "Work completion error: " << ibv_wc_status_str(wc.status)
                    << " (" << wc.status << "), vendor error: " << wc.vendor_err;
     }
-    if (g_on_receive_work_completion_callback)
+    if (wc.wr_id)
+    {
+        auto promise = reinterpret_cast<WorkPromise *>(wc.wr_id);
+        promise->done(&wc);
+    }
+    else if (g_on_receive_work_completion_callback)
     {
         g_on_receive_work_completion_callback(wc);
     }
