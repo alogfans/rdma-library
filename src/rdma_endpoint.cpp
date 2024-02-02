@@ -2,6 +2,7 @@
 // Copyright (C) 2024 Feng Ren
 
 #include "rdma_endpoint.h"
+#include "work_request.h"
 
 DEFINE_int32(rdma_max_sge, 4, "Max SGE num in a WR");
 DEFINE_int32(rdma_max_wr, 256, "Max WR entries num in a WR");
@@ -50,31 +51,20 @@ int CompletionQueue::RequestNotify()
     return 0;
 }
 
-int CompletionQueue::Poll(std::vector<ibv_wc> &wc_list, size_t max_count)
-{
-    LOG_ASSERT(IsAvailable());
-    wc_list.resize(max_count);
-    int nr_poll = ibv_poll_cq(cq_, max_count, wc_list.data());
-    if (nr_poll < 0)
-    {
-        PLOG(ERROR) << "Failed to poll CQ";
-        return -1;
-    }
-    wc_list.resize(nr_poll);
-    return 0;
-}
-
 int CompletionQueue::Poll(size_t max_count)
 {
     LOG_ASSERT(IsAvailable());
-    const static size_t kMaxWorkCompletionCapacity = 64;
-    ibv_wc wc_list[kMaxWorkCompletionCapacity];
-    int nr_poll = ibv_poll_cq(cq_, kMaxWorkCompletionCapacity, wc_list);
+
+    const static size_t kIbvWcListCapacity = 64;
+    ibv_wc wc_list[kIbvWcListCapacity];
+
+    int nr_poll = ibv_poll_cq(cq_, std::min(max_count, kIbvWcListCapacity), wc_list);
     if (nr_poll < 0)
     {
         PLOG(ERROR) << "Failed to poll CQ";
         return -1;
     }
+
     for (int i = 0; i < nr_poll; ++i)
     {
         auto &wc = wc_list[i];
@@ -85,15 +75,15 @@ int CompletionQueue::Poll(size_t max_count)
         }
         if (wc.wr_id)
         {
-            auto promise = reinterpret_cast<WorkPromise *>(wc.wr_id);
-            promise->done(&wc);
+            auto obj = reinterpret_cast<WorkRequestCallback *>(wc.wr_id);
+            obj->RunCallback(wc);
         }
     }
-    return 0;
+
+    return nr_poll;
 }
 
-QueuePair::QueuePair() : state_(STATE_INITIAL),
-                         queue_pair_(nullptr) {}
+QueuePair::QueuePair() : state_(STATE_INITIAL), qp_(nullptr) {}
 
 QueuePair::~QueuePair()
 {
@@ -102,10 +92,10 @@ QueuePair::~QueuePair()
 
 void QueuePair::Reset()
 {
-    if (queue_pair_)
+    if (qp_)
     {
-        ibv_destroy_qp(queue_pair_);
-        queue_pair_ = nullptr;
+        ibv_destroy_qp(qp_);
+        qp_ = nullptr;
     }
     state_.exchange(STATE_INITIAL);
 }
@@ -136,7 +126,7 @@ static int UpdateRdmaConfiguration()
     return 0;
 }
 
-int QueuePair::Create(CompletionQueue &send_cq, CompletionQueue &recv_cq, bool reliable_connection)
+int QueuePair::Create(CompletionQueue &send_cq, CompletionQueue &recv_cq, TransportType transport)
 {
     LOG_ASSERT(IsRdmaAvailable());
     if (GetState() != STATE_INITIAL)
@@ -152,21 +142,21 @@ int QueuePair::Create(CompletionQueue &send_cq, CompletionQueue &recv_cq, bool r
 
     ibv_qp_init_attr attr;
     memset(&attr, 0, sizeof(attr));
-    attr.send_cq = send_cq.GetRawObject();
-    attr.recv_cq = recv_cq.GetRawObject();
+    attr.send_cq = send_cq.GetIbvCQ();
+    attr.recv_cq = recv_cq.GetIbvCQ();
     attr.sq_sig_all = false;
-    attr.qp_type = reliable_connection ? IBV_QPT_RC : IBV_QPT_UD;
+    attr.qp_type = transport == TRANSPORT_TYPE_RC ? IBV_QPT_RC : IBV_QPT_UD;
     attr.cap.max_send_wr = attr.cap.max_recv_wr = FLAGS_rdma_max_wr;
     attr.cap.max_send_sge = attr.cap.max_recv_sge = FLAGS_rdma_max_sge;
     attr.cap.max_inline_data = FLAGS_rdma_max_inline;
-    queue_pair_ = ibv_create_qp(GetRdmaProtectionDomain(), &attr);
-    if (!queue_pair_)
+    qp_ = ibv_create_qp(GetRdmaProtectionDomain(), &attr);
+    if (!qp_)
     {
         PLOG(ERROR) << "Failed to create QP";
         return -1;
     }
 
-    state_.exchange(reliable_connection ? STATE_RC_CREATING : STATE_UD_CREATING);
+    state_.exchange(transport == TRANSPORT_TYPE_RC ? STATE_RC_CREATING : STATE_UD_CREATING);
     return 0;
 }
 
@@ -185,7 +175,7 @@ int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
     attr.port_num = GetRdmaPortNum();
     attr.pkey_index = 0;
     attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
-    if (ibv_modify_qp(queue_pair_, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS))
+    if (ibv_modify_qp(qp_, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS))
     {
         PLOG(ERROR) << "Failed to modity QP to INIT";
         state_.exchange(STATE_OFFLINE);
@@ -209,7 +199,7 @@ int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 16;
     attr.min_rnr_timer = 12; // 12 in previous implementation
-    if (ibv_modify_qp(queue_pair_, &attr, IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_MIN_RNR_TIMER | IBV_QP_AV | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN))
+    if (ibv_modify_qp(qp_, &attr, IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_MIN_RNR_TIMER | IBV_QP_AV | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN))
     {
         PLOG(ERROR) << "Failed to modity QP to RTR";
         state_.exchange(STATE_OFFLINE);
@@ -225,7 +215,7 @@ int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
     attr.sq_psn = 0;
     attr.max_rd_atomic = 16;
 
-    if (ibv_modify_qp(queue_pair_, &attr, IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC))
+    if (ibv_modify_qp(qp_, &attr, IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC))
     {
         PLOG(ERROR) << "Failed to modity QP to RTS";
         state_.exchange(STATE_OFFLINE);
@@ -236,172 +226,35 @@ int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
     return 0;
 }
 
-int QueuePair::PostRecv(ReceiveWRList &recv_wr)
-{
-    if (GetState() != STATE_RC_ESTABLISHED)
-    {
-        LOG(ERROR) << "Endpoint is not in RC_ESTABLISHED state";
-        return -1;
-    }
-    if (recv_wr.wr_list.empty())
-    {
-        LOG(WARNING) << "Skip to send empty work request";
-        return 0;
-    }
-    if (ibv_post_recv(queue_pair_, recv_wr.wr_list.data(), &recv_wr.bad_wr))
-    {
-        PLOG(ERROR) << "Fail to post recv work requests";
-        return -1;
-    }
-    return 0;
-}
-
 uint32_t QueuePair::GetQPNum() const
 {
     if (GetState() == STATE_INITIAL)
     {
         LOG(ERROR) << "Endpoint is in INITIAL state";
-        return -1;
+        return UINT32_MAX;
     }
-    LOG_ASSERT(queue_pair_);
-    return queue_pair_->qp_num;
+    LOG_ASSERT(qp_);
+    return qp_->qp_num;
 }
 
-void SendWRList::Reset()
+int QueuePair::Post(WorkRequestBase &wr_list)
 {
-    wr_list.clear();
-    sge_list.clear();
-    bad_wr = nullptr;
-    wr_list.reserve(FLAGS_rdma_max_wr);
-    sge_list.reserve(FLAGS_rdma_max_wr * FLAGS_rdma_max_sge);
-}
-
-void ReceiveWRList::Reset()
-{
-    wr_list.clear();
-    sge_list.clear();
-    bad_wr = nullptr;
-    wr_list.reserve(FLAGS_rdma_max_wr);
-    sge_list.reserve(FLAGS_rdma_max_wr * FLAGS_rdma_max_sge);
-}
-
-int FillSendWRList(ibv_send_wr *wr_list, ibv_sge *sge_list, size_t wr_list_pos, size_t sge_list_pos,
-                   ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, uint32_t rkey,
-                   size_t length, uint64_t compare_add, uint64_t swap)
-{
-    auto &wr = wr_list[wr_list_pos];
-    auto &sge = sge_list[sge_list_pos];
-
-    auto key = GetRdmaMemoryRegion(local);
-    if (!key.lkey)
+    ibv_send_wr *send_bad_wr;
+    ibv_recv_wr *recv_bad_wr;
+    if (GetState() != STATE_RC_ESTABLISHED)
     {
-        LOG(ERROR) << "Unable to find memory region at " << local;
+        LOG(ERROR) << "Endpoint is not in RC_ESTABLISHED state";
         return -1;
     }
-
-    sge.addr = uintptr_t(local);
-    sge.length = length;
-    sge.lkey = key.lkey;
-
-    // wr.wr_id = 0;
-    wr.opcode = opcode;
-    wr.num_sge = 1;
-    wr.sg_list = &sge;
-    wr.send_flags = IBV_SEND_SIGNALED;
-    wr.next = nullptr;
-    if (wr_list_pos)
+    if (wr_list.HasOneSideAndSend() && ibv_post_send(qp_, wr_list.GetIbvSendWr(), &send_bad_wr))
     {
-        wr_list[wr_list_pos - 1].next = &wr;
-        wr_list[wr_list_pos - 1].send_flags &= ~IBV_SEND_SIGNALED;
-    }
-
-    switch (opcode)
-    {
-    case IBV_WR_RDMA_WRITE:
-    case IBV_WR_RDMA_WRITE_WITH_IMM:
-        if (length <= size_t(FLAGS_rdma_max_inline))
-        {
-            wr.send_flags |= IBV_SEND_INLINE;
-        }
-        // fall-through
-
-    case IBV_WR_RDMA_READ:
-        wr.wr.rdma.remote_addr = remote_addr;
-        wr.wr.rdma.rkey = rkey;
-        break;
-
-    case IBV_WR_ATOMIC_FETCH_AND_ADD:
-    case IBV_WR_ATOMIC_CMP_AND_SWP:
-        wr.wr.atomic.remote_addr = remote_addr;
-        wr.wr.atomic.rkey = rkey;
-        wr.wr.atomic.compare_add = compare_add;
-        wr.wr.atomic.swap = swap;
-        break;
-
-    case IBV_WR_SEND:
-        break;
-
-    default:
-        LOG(ERROR) << "Unsupported opcode " << opcode;
+        PLOG(ERROR) << "Fail to execute ibv_post_send";
         return -1;
     }
-
-    return 0;
-}
-
-int SendWRList::Add(ibv_wr_opcode opcode, void *local, uintptr_t remote_addr, uint32_t rkey,
-                    size_t length, uint64_t compare_add, uint64_t swap)
-{
-    size_t wr_list_pos = wr_list.size();
-    size_t sge_list_pos = sge_list.size();
-    if (wr_list_pos >= wr_list.capacity() || sge_list_pos >= sge_list.capacity())
+    if (wr_list.HasRecv() && ibv_post_recv(qp_, wr_list.GetIbvRecvWr(), &recv_bad_wr))
     {
-        LOG(ERROR) << "WR and SGE capacity exceeded";
+        PLOG(ERROR) << "Fail to execute ibv_post_recv";
         return -1;
     }
-
-    wr_list.resize(wr_list_pos + 1);
-    sge_list.resize(sge_list_pos + 1);
-    wr_list[wr_list_pos].wr_id = promise.done ? (uint64_t)(&promise) : 0;
-    return FillSendWRList(wr_list.data(), sge_list.data(), wr_list_pos, sge_list_pos,
-                          opcode, local, remote_addr, rkey,
-                          length, compare_add, swap);
-}
-
-int ReceiveWRList::Recv(void *local, size_t length)
-{
-    size_t wr_list_pos = wr_list.size();
-    size_t sge_list_pos = sge_list.size();
-    if (wr_list_pos >= wr_list.capacity() || sge_list_pos >= sge_list.capacity())
-    {
-        LOG(ERROR) << "WR and SGE capacity exceeded";
-        return -1;
-    }
-
-    wr_list.resize(wr_list_pos + 1);
-    sge_list.resize(sge_list_pos + 1);
-    auto &wr = wr_list[wr_list_pos];
-    auto &sge = sge_list[sge_list_pos];
-
-    auto key = GetRdmaMemoryRegion(local);
-    if (!key.lkey)
-    {
-        LOG(ERROR) << "Unable to find memory region at " << local;
-        return -1;
-    }
-
-    sge.addr = uintptr_t(local);
-    sge.length = length;
-    sge.lkey = key.lkey;
-
-    wr.wr_id = promise.done ? (uint64_t)(&promise) : 0;
-    wr.num_sge = 1;
-    wr.sg_list = &sge;
-    wr.next = nullptr;
-    if (wr_list_pos)
-    {
-        wr_list[wr_list_pos - 1].next = &wr;
-    }
-
     return 0;
 }

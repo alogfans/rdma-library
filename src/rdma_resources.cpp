@@ -286,14 +286,18 @@ MemoryRegionKey GetRdmaMemoryRegion(void *buf)
     LOG_ASSERT(IsRdmaAvailable());
     ibv_mr *mr = nullptr;
     if (FLAGS_rdma_local_mr_rwlock)
+    {
         pthread_rwlock_rdlock(&g_rdma_resource->rwlock);
+    }
     auto iter = g_rdma_resource->memory_regions.lower_bound(buf);
     if (iter != g_rdma_resource->memory_regions.end())
     {
         mr = iter->second;
     }
     if (FLAGS_rdma_local_mr_rwlock)
+    {
         pthread_rwlock_unlock(&g_rdma_resource->rwlock);
+    }
     if (mr && mr->addr <= buf && buf < (void *)((intptr_t(mr->addr) + mr->length)))
     {
         return {mr->lkey, mr->rkey};
@@ -388,6 +392,7 @@ void RegisterOnReceiveWorkCompletionCallback(OnReceiveWorkCompletionCallback &&c
 static int ProcessContextEvent()
 {
     ibv_async_event event;
+    int num_events = 0;
     while (true)
     {
         if (ibv_get_async_event(g_rdma_resource->context, &event) < 0)
@@ -405,8 +410,9 @@ static int ProcessContextEvent()
             g_on_receive_async_event_callback(event);
         }
         ibv_ack_async_event(&event);
+        num_events++;
     }
-    return 0;
+    return num_events;
 }
 
 static int GetAndAckEvents(std::vector<struct ibv_cq *> &cq_list)
@@ -449,8 +455,8 @@ static void ProcessWorkCompletion(struct ibv_wc &wc)
     }
     if (wc.wr_id)
     {
-        auto promise = reinterpret_cast<WorkPromise *>(wc.wr_id);
-        promise->done(&wc);
+        auto obj = reinterpret_cast<WorkRequestCallback *>(wc.wr_id);
+        obj->RunCallback(wc);
     }
     else if (g_on_receive_work_completion_callback)
     {

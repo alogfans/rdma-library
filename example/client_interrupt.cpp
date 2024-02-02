@@ -95,34 +95,39 @@ private:
         std::uniform_int_distribution<uint64_t> dist_offset(0, kSegmentSize / FLAGS_block_size - 1);
         std::uniform_int_distribution<uint32_t> dist_percent(0, 99);
         QueuePair *qp = qp_list_[thread_id % qp_list_.size()];
-        CompletionQueue *cq = cq_list_[thread_id % qp_list_.size()];
-
         pthread_barrier_wait(&barrier_);
-        uint32_t inflight_wr_count = 0;
-        DefaultWorkRequest wr_list;
         while (running_.load(std::memory_order_relaxed))
         {
-            std::vector<ibv_wc> wc_list;
-            if (inflight_wr_count < FLAGS_depth)
+            DefaultWorkRequest wr_list[FLAGS_depth];
+            for (uint32_t i = 0; i < FLAGS_depth; ++i)
             {
+                wr_list[i].EnableCallback();
                 char *local = local_base + (local_operation_count % FLAGS_depth) * storage_size;
                 uint64_t remote_addr = remote_base + uint64_t(FLAGS_block_size) * dist_offset(rnd);
-                wr_list.Reset();
                 if (dist_percent(rnd) < FLAGS_read_percentage)
                 {
-                    DIED_IF(wr_list.Read(local, remote_addr, mr_info.rkey, FLAGS_block_size));
+                    DIED_IF(wr_list[i].Read(local, remote_addr, mr_info.rkey, FLAGS_block_size));
                 }
                 else
                 {
-                    DIED_IF(wr_list.Write(local, remote_addr, mr_info.rkey, FLAGS_block_size));
+                    DIED_IF(wr_list[i].Write(local, remote_addr, mr_info.rkey, FLAGS_block_size));
                 }
-                DIED_IF(qp->Post(wr_list));
-                inflight_wr_count++;
+                DIED_IF(qp->Post(wr_list[i]));
             }
-            if (cq->Poll(1) == 1)
+            for (uint32_t i = 0; i < FLAGS_depth; ++i)
             {
-                local_operation_count++;
-                inflight_wr_count--;
+                auto future = wr_list[i].GetFuture();
+                try
+                {
+                    future.get();
+                }
+                catch (const std::future_error &e)
+                {
+                    LOG(INFO) << "Caught a future_error with code \"" << e.code()
+                              << "\", Message: \"" << e.what() << "\"\n";
+                    exit(0);
+                }
+                ++local_operation_count;
             }
         }
 
@@ -165,10 +170,25 @@ void CreateQPCQ(ConnectionClient &client, QueuePair &qp, CompletionQueue &cq)
     }
 }
 
+std::atomic<bool> eventloop_running_(true);
+
+void EventLoop()
+{
+    while (eventloop_running_.load(std::memory_order_relaxed))
+    {
+        ProcessEvents(100, true);
+    }
+    while (ProcessEvents(0, false) > 0)
+    {
+        LOG(INFO) << "Process Remaining CQs";
+    }
+}
+
 int main(int argc, char **argv)
 {
     gflags::ParseCommandLineFlags(&argc, &argv, false);
     CreateRdmaGlobalResource();
+    std::thread eventloop_ = std::thread(&EventLoop);
 
     if (FLAGS_memory_region_mb < 16)
     {
@@ -209,14 +229,16 @@ int main(int argc, char **argv)
     }
     mr_info = mr_list[0];
 
-    CompletionQueue cq[FLAGS_qp_count];
+    CompletionQueue cq;
+    cq.RequestNotify();
+
     QueuePair qp[FLAGS_qp_count];
     Benchmark bench;
 
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
-        CreateQPCQ(client, qp[i], cq[i]);
-        bench.AddEndPoint(&qp[i], &cq[i]);
+        CreateQPCQ(client, qp[i], cq);
+        bench.AddEndPoint(&qp[i], &cq);
     }
 
     bench.Run();
@@ -224,10 +246,13 @@ int main(int argc, char **argv)
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
         qp[i].Reset();
-        cq[i].Reset();
     }
+    cq.Reset();
     client.Close();
     DeregisterRdmaMemoryRegion(region);
     munmap(region, FLAGS_memory_region_mb * kMegaBytes);
+
+    eventloop_running_ = false;
+    eventloop_.join();
     return 0;
 }

@@ -48,15 +48,12 @@ TEST(rdma_resources, basic_test)
     qp_num[1] = qp[1].GetQPNum();
     ASSERT_FALSE(qp[0].SetupRC(GetRdmaGid(), GetRdmaLid(), qp_num[1]));
     ASSERT_FALSE(qp[1].SetupRC(GetRdmaGid(), GetRdmaLid(), qp_num[0]));
-    SendWRList send_wr;
+    DefaultWorkRequest send_wr;
     strcpy(pool[0], "Hello world!");
     ASSERT_FALSE(send_wr.Write(pool[0], (uint64_t)pool[1], key_list[1].rkey, 13));
-    ASSERT_FALSE(qp[0].PostSend(send_wr));
-    std::vector<ibv_wc> wc_list;
-    while (wc_list.empty())
-    {
-        ASSERT_FALSE(cq[0].Poll(wc_list));
-    }
+    ASSERT_FALSE(qp[0].Post(send_wr));
+    while (cq[0].Poll() != 1)
+        ;
     EXPECT_TRUE(strcmp(pool[1], "Hello world!") == 0);
     for (int i = 0; i < 2; ++i)
     {
