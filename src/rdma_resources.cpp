@@ -46,6 +46,8 @@ struct DeviceDeleter
     ibv_device **devices;
 };
 
+const static size_t kNumCompChannel = 8;
+
 struct RdmaGlobalResource
 {
     pthread_rwlock_t rwlock;
@@ -55,13 +57,14 @@ struct RdmaGlobalResource
     ibv_gid gid;
     int gid_index;
     ibv_pd *protection_domain = nullptr;
-    ibv_comp_channel *completion_channel = nullptr;
+    ibv_comp_channel *completion_channel[kNumCompChannel] = {nullptr};
     int event_fd = -1;
     std::map<void *, ibv_mr *, ReverseComparator> memory_regions; // start_addr -> memory region
 };
 
 static RdmaGlobalResource *g_rdma_resource = nullptr;
 static std::atomic<int> g_comp_vector_index(0);
+static std::atomic<int> g_comp_channel_index(0);
 static std::atomic<bool> g_rdma_available(false);
 static OnReceiveAsyncEventCallback g_on_receive_async_event_callback;
 static OnReceiveWorkCompletionCallback g_on_receive_work_completion_callback;
@@ -140,10 +143,13 @@ static void DestroyRdmaGlobalResource()
         close(g_rdma_resource->event_fd);
         g_rdma_resource->event_fd = -1;
     }
-    if (g_rdma_resource->completion_channel)
+    for (size_t i = 0; i < kNumCompChannel; ++i)
     {
-        ibv_destroy_comp_channel(g_rdma_resource->completion_channel);
-        g_rdma_resource->completion_channel = nullptr;
+        if (g_rdma_resource->completion_channel[i])
+        {
+            ibv_destroy_comp_channel(g_rdma_resource->completion_channel[i]);
+            g_rdma_resource->completion_channel[i] = nullptr;
+        }
     }
     if (g_rdma_resource->protection_domain)
     {
@@ -173,29 +179,36 @@ static std::string GidToString()
     return gid;
 }
 
-static int SetFileDescriptorNonBlocking(int fd)
+static int JoinNonblockingPollSet(int event_fd, int data_fd)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
+    epoll_event event;
+    int flags = fcntl(data_fd, F_GETFL, 0);
     if (flags == -1)
     {
         PLOG(ERROR) << "Get F_GETFL failed";
         return -1;
     }
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
+    if (fcntl(data_fd, F_SETFL, flags | O_NONBLOCK) == -1)
     {
         PLOG(ERROR) << "Set F_GETFL failed";
         return -1;
     }
+
+    memset(&event, 0, sizeof(epoll_event));
+    event.events = EPOLLIN | EPOLLET;
+    event.data.fd = data_fd;
+    if (epoll_ctl(event_fd, EPOLL_CTL_ADD, event.data.fd, &event))
+    {
+        PLOG(ERROR) << "Failed to register data fd to epoll";
+        close(event_fd);
+        return -1;
+    }
+
     return 0;
 }
 
 static int SetupRdmaEventDescriptor()
 {
-    if (SetFileDescriptorNonBlocking(g_rdma_resource->context->async_fd) || SetFileDescriptorNonBlocking(g_rdma_resource->completion_channel->fd))
-    {
-        return -1;
-    }
-
     int event_fd = epoll_create1(0);
     if (event_fd < 0)
     {
@@ -203,26 +216,17 @@ static int SetupRdmaEventDescriptor()
         return -1;
     }
 
-    epoll_event event;
-    memset(&event, 0, sizeof(epoll_event));
-    event.events = EPOLLIN | EPOLLET;
-    event.data.fd = g_rdma_resource->context->async_fd;
-    if (epoll_ctl(event_fd, EPOLL_CTL_ADD, event.data.fd, &event))
-    {
-        PLOG(ERROR) << "Failed to register comp_channel fd to epoll";
-        close(event_fd);
-        return -1;
-    }
-
-    event.data.fd = g_rdma_resource->completion_channel->fd;
-    if (epoll_ctl(event_fd, EPOLL_CTL_ADD, event.data.fd, &event))
-    {
-        PLOG(ERROR) << "Failed to register comp_channel fd to epoll";
-        close(event_fd);
-        return -1;
-    }
-
     g_rdma_resource->event_fd = event_fd;
+
+    if (JoinNonblockingPollSet(event_fd, g_rdma_resource->context->async_fd))
+        return -1;
+
+    for (size_t i = 0; i < kNumCompChannel; ++i)
+    {
+        if (JoinNonblockingPollSet(event_fd, g_rdma_resource->completion_channel[i]->fd))
+            return -1;
+    }
+
     return 0;
 }
 
@@ -240,8 +244,11 @@ static void CreateRdmaGlobalResourceImpl()
               << ", GID: (" << FLAGS_rdma_gid_index << ") " << GidToString();
     g_rdma_resource->protection_domain = ibv_alloc_pd(g_rdma_resource->context);
     DIE_IF(g_rdma_resource->protection_domain == nullptr);
-    g_rdma_resource->completion_channel = ibv_create_comp_channel(g_rdma_resource->context);
-    DIE_IF(g_rdma_resource->completion_channel == nullptr);
+    for (size_t i = 0; i < kNumCompChannel; ++i)
+    {
+        g_rdma_resource->completion_channel[i] = ibv_create_comp_channel(g_rdma_resource->context);
+        DIE_IF(g_rdma_resource->completion_channel[i] == nullptr);
+    }
     DIE_IF(SetupRdmaEventDescriptor());
 
     ibv_device_attr attr;
@@ -348,7 +355,8 @@ ibv_pd *GetRdmaProtectionDomain()
 ibv_comp_channel *GetRdmaCompletionChannel()
 {
     LOG_ASSERT(IsRdmaAvailable());
-    return g_rdma_resource->completion_channel;
+    int index = (g_comp_channel_index++) % kNumCompChannel;
+    return g_rdma_resource->completion_channel[index];
 }
 
 uint8_t GetRdmaPortNum()
@@ -416,7 +424,7 @@ static int ProcessContextEvent()
     return num_events;
 }
 
-static int GetAndAckEvents(std::vector<struct ibv_cq *> &cq_list)
+static int GetAndAckEvents(ibv_comp_channel *comp_channel, std::vector<struct ibv_cq *> &cq_list)
 {
     struct ibv_cq *cq;
     void *cq_context = nullptr;
@@ -424,7 +432,7 @@ static int GetAndAckEvents(std::vector<struct ibv_cq *> &cq_list)
     int events = 0;
     while (true)
     {
-        if (ibv_get_cq_event(g_rdma_resource->completion_channel, &cq, &cq_context) < 0)
+        if (ibv_get_cq_event(comp_channel, &cq, &cq_context) < 0)
         {
             if (errno != EAGAIN)
             {
@@ -468,7 +476,7 @@ static void ProcessWorkCompletion(struct ibv_wc &wc)
     }
 }
 
-static int ProcessCompletionChannelEvent(bool notify_cq_on_demand)
+static int ProcessCompletionChannelEvent(ibv_comp_channel *comp_channel, bool notify_cq_on_demand)
 {
     const static size_t kWorkCompEntries = 16;
     struct ibv_wc wc_list[kWorkCompEntries];
@@ -477,7 +485,7 @@ static int ProcessCompletionChannelEvent(bool notify_cq_on_demand)
 
     while (true)
     {
-        nr_events = GetAndAckEvents(cq_list);
+        nr_events = GetAndAckEvents(comp_channel, cq_list);
         if (nr_events <= 0)
         {
             return nr_events;
@@ -535,9 +543,13 @@ int ProcessEvents(int timeout, bool notify_cq_on_demand)
         return ProcessContextEvent();
     }
 
-    if (event.data.fd == g_rdma_resource->completion_channel->fd)
+    for (size_t i = 0; i < kNumCompChannel; ++i)
     {
-        return ProcessCompletionChannelEvent(notify_cq_on_demand);
+        if (event.data.fd == g_rdma_resource->completion_channel[i]->fd)
+        {
+            return ProcessCompletionChannelEvent(g_rdma_resource->completion_channel[i],
+                                                 notify_cq_on_demand);
+        }
     }
 
     LOG(ERROR) << "Unexpected event, fd: " << event.data.fd

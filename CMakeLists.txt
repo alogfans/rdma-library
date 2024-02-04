@@ -6,12 +6,12 @@ set(CMAKE_CXX_FLAGS "-O3 -g -Wall")
 
 include_directories(include)
 
-add_library(librdma src/rdma_resources.cpp 
+add_library(rdma src/rdma_resources.cpp 
                     src/rdma_endpoint.cpp 
                     src/connection_manager.cpp 
                     src/memory_pool.cpp
                     src/async_executor.cpp)
-target_link_libraries(librdma PUBLIC ibverbs glog gflags pthread)
+target_link_libraries(rdma PUBLIC ibverbs glog gflags pthread)
 
 add_subdirectory(example)
 add_subdirectory(test)
