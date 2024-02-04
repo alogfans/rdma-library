@@ -170,25 +170,11 @@ void CreateQPCQ(ConnectionClient &client, QueuePair &qp, CompletionQueue &cq)
     }
 }
 
-std::atomic<bool> eventloop_running_(true);
-
-void EventLoop()
-{
-    while (eventloop_running_.load(std::memory_order_relaxed))
-    {
-        ProcessEvents(100, true);
-    }
-    while (ProcessEvents(0, false) > 0)
-    {
-        LOG(INFO) << "Process Remaining CQs";
-    }
-}
-
 int main(int argc, char **argv)
 {
     gflags::ParseCommandLineFlags(&argc, &argv, false);
     CreateRdmaGlobalResource();
-    std::thread eventloop_ = std::thread(&EventLoop);
+    StartEventLoopThread();
 
     if (FLAGS_memory_region_mb < 16)
     {
@@ -229,16 +215,15 @@ int main(int argc, char **argv)
     }
     mr_info = mr_list[0];
 
-    CompletionQueue cq;
-    cq.RequestNotify();
-
+    CompletionQueue cq[FLAGS_qp_count];
     QueuePair qp[FLAGS_qp_count];
     Benchmark bench;
 
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
-        CreateQPCQ(client, qp[i], cq);
-        bench.AddEndPoint(&qp[i], &cq);
+        cq[i].RequestNotify();
+        CreateQPCQ(client, qp[i], cq[i]);
+        bench.AddEndPoint(&qp[i], &cq[i]);
     }
 
     bench.Run();
@@ -246,13 +231,11 @@ int main(int argc, char **argv)
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
         qp[i].Reset();
+        cq[i].Reset();
     }
-    cq.Reset();
+
     client.Close();
     DeregisterRdmaMemoryRegion(region);
     munmap(region, FLAGS_memory_region_mb * kMegaBytes);
-
-    eventloop_running_ = false;
-    eventloop_.join();
     return 0;
 }

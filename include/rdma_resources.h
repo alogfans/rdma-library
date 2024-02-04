@@ -60,4 +60,6 @@ void RegisterOnReceiveWorkCompletionCallback(OnReceiveWorkCompletionCallback &&c
 
 int ProcessEvents(int timeout, bool notify_cq_on_demand);
 
+void StartEventLoopThread();
+
 #endif // RDMA_RESOURCES_H

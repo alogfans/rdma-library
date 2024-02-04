@@ -3,6 +3,7 @@
 
 #include "rdma_resources.h"
 #include "rdma_endpoint.h"
+#include <unordered_map>
 
 #include <map>
 #include <atomic>
@@ -419,8 +420,8 @@ static int GetAndAckEvents(std::vector<struct ibv_cq *> &cq_list)
 {
     struct ibv_cq *cq;
     void *cq_context = nullptr;
+    std::unordered_map<ibv_cq *, int> cq_events;
     int events = 0;
-    cq_list.clear();
     while (true)
     {
         if (ibv_get_cq_event(g_rdma_resource->completion_channel, &cq, &cq_context) < 0)
@@ -428,21 +429,24 @@ static int GetAndAckEvents(std::vector<struct ibv_cq *> &cq_list)
             if (errno != EAGAIN)
             {
                 PLOG(ERROR) << "Failed to get CQ event";
-                if (events)
-                {
-                    ibv_ack_cq_events(cq, events);
-                }
-                return -1;
             }
             break; // There is no available CQ event
         }
-        cq_list.push_back(cq);
-        ++events;
+
+        if (cq_events.count(cq))
+            cq_events[cq]++;
+        else
+            cq_events[cq] = 1;
     }
-    if (events)
+
+    cq_list.clear();
+    for (auto &entry : cq_events)
     {
-        ibv_ack_cq_events(cq, events);
+        cq_list.push_back(entry.first);
+        events += entry.second;
+        ibv_ack_cq_events(entry.first, entry.second);
     }
+
     return events;
 }
 
@@ -540,4 +544,45 @@ int ProcessEvents(int timeout, bool notify_cq_on_demand)
                << ", events: " << event.events;
 
     return -1;
+}
+
+static pthread_t g_eventloop_thread;
+static std::atomic<bool> g_eventloop_running;
+
+static void *EventLoopRunner(void *arg)
+{
+    int num_events = 0;
+
+    while (g_eventloop_running.load(std::memory_order_relaxed))
+    {
+        num_events = ProcessEvents(100, true);
+        if (num_events < 0)
+        {
+            LOG(WARNING) << "Process events failed";
+        }
+    }
+
+    num_events = ProcessEvents(0, false); // drain remaining events
+    if (num_events < 0)
+    {
+        LOG(WARNING) << "Process events failed";
+    }
+
+    return nullptr;
+}
+
+static void DestroyEventLoopThread()
+{
+    if (g_eventloop_running.exchange(false))
+    {
+        pthread_join(g_eventloop_thread, nullptr);
+    }
+}
+
+void StartEventLoopThread()
+{
+    LOG_ASSERT(IsRdmaAvailable());
+    DIE_IF(atexit(DestroyEventLoopThread));
+    g_eventloop_running.store(true);
+    DIE_IF(pthread_create(&g_eventloop_thread, nullptr, EventLoopRunner, nullptr));
 }
