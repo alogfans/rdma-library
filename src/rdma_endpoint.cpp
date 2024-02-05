@@ -13,6 +13,43 @@ const static uint8_t MAX_HOP_LIMIT = 16;
 const static uint8_t TIMEOUT = 14;
 const static uint8_t RETRY_CNT = 7;
 
+int AddressHandle::Create(ibv_gid gid, uint16_t lid, uint32_t qp_num)
+{
+    ibv_ah_attr ah_attr;
+    memset(&ah_attr, 0, sizeof(ah_attr));
+    ah_attr.grh.dgid = gid;
+    ah_attr.grh.sgid_index = GetRdmaGidIndex();
+    ah_attr.grh.hop_limit = MAX_HOP_LIMIT;
+    ah_attr.dlid = lid;
+    ah_attr.sl = 0;
+    ah_attr.src_path_bits = 0;
+    ah_attr.static_rate = 0;
+    ah_attr.is_global = 1;
+    ah_attr.port_num = GetRdmaPortNum();
+    ah_ = ibv_create_ah(GetRdmaProtectionDomain(), &ah_attr);
+    if (!ah_)
+    {
+        PLOG(ERROR) << "Failed to create AH";
+        return -1;
+    }
+    qp_num_ = qp_num;
+    return 0;
+}
+
+AddressHandle::~AddressHandle()
+{
+    Reset();
+}
+
+void AddressHandle::Reset()
+{
+    if (ah_)
+    {
+        ibv_destroy_ah(ah_);
+        ah_ = nullptr;
+    }
+}
+
 CompletionQueue::CompletionQueue()
 {
     cq_ = ibv_create_cq(GetRdmaContext(),
@@ -157,14 +194,18 @@ int QueuePair::Create(CompletionQueue &send_cq, CompletionQueue &recv_cq, Transp
     }
 
     state_.exchange(transport == TRANSPORT_TYPE_RC ? STATE_RC_CREATING : STATE_UD_CREATING);
-    return 0;
+
+    if (transport == TRANSPORT_TYPE_UD)
+        return SetupUD();
+    else
+        return 0;
 }
 
 int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
 {
     if (GetState() != STATE_RC_CREATING)
     {
-        LOG(ERROR) << "Endpoint is not in RC_CREATING state";
+        LOG(ERROR) << "QP is not in RC_CREATING state";
         return -1;
     }
 
@@ -226,11 +267,58 @@ int QueuePair::SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num)
     return 0;
 }
 
+int QueuePair::SetupUD()
+{
+    if (GetState() != STATE_UD_CREATING)
+    {
+        LOG(ERROR) << "QP is not in UD_CREATING state";
+        return -1;
+    }
+
+    ibv_qp_attr attr;
+    // RESET -> INIT
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_INIT;
+    attr.port_num = GetRdmaPortNum();
+    attr.pkey_index = 0;
+    attr.qkey = UD_QP_QKEY;
+    if (ibv_modify_qp(qp_, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY))
+    {
+        PLOG(ERROR) << "Failed to modity QP to INIT";
+        state_.exchange(STATE_OFFLINE);
+        return -1;
+    }
+
+    // INIT -> RTR
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTR;
+    if (ibv_modify_qp(qp_, &attr, IBV_QP_STATE))
+    {
+        PLOG(ERROR) << "Failed to modity QP to RTR";
+        state_.exchange(STATE_OFFLINE);
+        return -1;
+    }
+
+    // RTR -> RTS
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state = IBV_QPS_RTS;
+    attr.sq_psn = 0;
+    if (ibv_modify_qp(qp_, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN))
+    {
+        PLOG(ERROR) << "Failed to modity QP to RTS";
+        state_.exchange(STATE_OFFLINE);
+        return -1;
+    }
+
+    state_.exchange(STATE_UD_ESTABLISHED);
+    return 0;
+}
+
 uint32_t QueuePair::GetQPNum() const
 {
     if (GetState() == STATE_INITIAL)
     {
-        LOG(ERROR) << "Endpoint is in INITIAL state";
+        LOG(ERROR) << "QP is in INITIAL state";
         return UINT32_MAX;
     }
     LOG_ASSERT(qp_);
@@ -239,13 +327,44 @@ uint32_t QueuePair::GetQPNum() const
 
 int QueuePair::Post(WorkRequestBase &wr_list)
 {
-    ibv_send_wr *send_bad_wr;
-    ibv_recv_wr *recv_bad_wr;
-    if (GetState() != STATE_RC_ESTABLISHED)
+    auto state = GetState();
+    if (state == STATE_RC_ESTABLISHED)
     {
-        LOG(ERROR) << "Endpoint is not in RC_ESTABLISHED state";
+        return PostRC(wr_list);
+    }
+    else if (state == STATE_UD_ESTABLISHED)
+    {
+        return PostUD(wr_list);
+    }
+    else
+    {
+        PLOG(ERROR) << "QP is not in ESTABLISHED state";
         return -1;
     }
+    return 0;
+}
+
+int QueuePair::PostRC(WorkRequestBase &wr_list)
+{
+    ibv_send_wr *send_bad_wr;
+    ibv_recv_wr *recv_bad_wr;
+    if (wr_list.HasOneSideAndSend() && ibv_post_send(qp_, wr_list.GetIbvSendWr(), &send_bad_wr))
+    {
+        PLOG(ERROR) << "Fail to execute ibv_post_send";
+        return -1;
+    }
+    if (wr_list.HasRecv() && ibv_post_recv(qp_, wr_list.GetIbvRecvWr(), &recv_bad_wr))
+    {
+        PLOG(ERROR) << "Fail to execute ibv_post_recv";
+        return -1;
+    }
+    return 0;
+}
+
+int QueuePair::PostUD(WorkRequestBase &wr_list)
+{
+    ibv_send_wr *send_bad_wr;
+    ibv_recv_wr *recv_bad_wr;
     if (wr_list.HasOneSideAndSend() && ibv_post_send(qp_, wr_list.GetIbvSendWr(), &send_bad_wr))
     {
         PLOG(ERROR) << "Fail to execute ibv_post_send";

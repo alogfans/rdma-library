@@ -14,7 +14,7 @@ DEFINE_uint32(depth, 1, "Number of concurrent requests for each thread");
 DEFINE_uint32(block_size, 8, "Granularity for each request");
 DEFINE_uint32(duration, 10, "Test duration in seconds");
 DEFINE_uint32(qp_count, 1, "Number of QP count for multiplexing");
-DEFINE_uint32(read_percentage, 100, "Percentage of read operation [0-100]");
+DEFINE_bool(rc, true, "Use reliable connection");
 
 const static size_t kMegaBytes = 1024 * 1024;
 
@@ -42,10 +42,11 @@ uint64_t rounddown(uint64_t a, uint64_t b)
 class Benchmark
 {
 public:
-    void AddEndPoint(QueuePair *qp, CompletionQueue *cq)
+    void AddEndPoint(QueuePair *qp, CompletionQueue *cq, AddressHandle *ah)
     {
         qp_list_.push_back(qp);
         cq_list_.push_back(cq);
+        ah_list_.push_back(ah);
     }
 
     void Run()
@@ -91,24 +92,49 @@ private:
 
         QueuePair *qp = qp_list_[thread_id % qp_list_.size()];
         CompletionQueue *cq = cq_list_[thread_id % qp_list_.size()];
+        AddressHandle *ah = ah_list_[thread_id % qp_list_.size()];
 
         pthread_barrier_wait(&barrier_);
         uint32_t inflight_wr_count = 0;
-        DefaultWorkRequest wr_list;
-        while (running_.load(std::memory_order_relaxed))
+        if (FLAGS_rc)
         {
-            if (inflight_wr_count < FLAGS_depth)
+            DefaultWorkRequest wr_list;
+            while (running_.load(std::memory_order_relaxed))
             {
-                char *local = local_base + (local_operation_count % FLAGS_depth) * storage_size;
-                wr_list.Reset();
-                DIED_IF(wr_list.Send(local, FLAGS_block_size));
-                DIED_IF(qp->Post(wr_list));
-                inflight_wr_count++;
+                if (inflight_wr_count < FLAGS_depth)
+                {
+                    char *local = local_base + (local_operation_count % FLAGS_depth) * storage_size;
+                    wr_list.Reset();
+                    DIED_IF(wr_list.Send(local, FLAGS_block_size));
+                    DIED_IF(qp->Post(wr_list));
+                    inflight_wr_count++;
+                }
+                if (cq->Poll(1) == 1)
+                {
+                    local_operation_count++;
+                    inflight_wr_count--;
+                }
             }
-            if (cq->Poll(1) == 1)
+        }
+        else
+        {
+            WorkRequestUD wr_list;
+            while (running_.load(std::memory_order_relaxed))
             {
-                local_operation_count++;
-                inflight_wr_count--;
+                if (inflight_wr_count < FLAGS_depth)
+                {
+                    char *local = local_base + (local_operation_count % FLAGS_depth) * storage_size;
+                    wr_list.Reset();
+                    wr_list.SetSendOption(ah->GetIbvAH(), ah->GetQPNum());
+                    DIED_IF(wr_list.Send(local, FLAGS_block_size));
+                    DIED_IF(qp->Post(wr_list));
+                    inflight_wr_count++;
+                }
+                if (cq->Poll(1) == 1)
+                {
+                    local_operation_count++;
+                    inflight_wr_count--;
+                }
             }
         }
 
@@ -119,15 +145,16 @@ private:
 private:
     std::vector<QueuePair *> qp_list_;
     std::vector<CompletionQueue *> cq_list_;
+    std::vector<AddressHandle *> ah_list_;
     std::vector<std::thread> worker_list_;
     std::atomic<bool> running_;
     std::atomic<uint64_t> operation_count_;
     pthread_barrier_t barrier_;
 };
 
-void CreateQPCQ(ConnectionClient &client, QueuePair &qp, CompletionQueue &cq)
+void CreateQPCQ(ConnectionClient &client, QueuePair &qp, CompletionQueue &cq, AddressHandle &ah)
 {
-    if (qp.Create(cq))
+    if (qp.Create(cq, FLAGS_rc ? QueuePair::TRANSPORT_TYPE_RC : QueuePair::TRANSPORT_TYPE_UD))
     {
         LOG(ERROR) << "Unable to create QP";
         exit(EXIT_FAILURE);
@@ -144,10 +171,21 @@ void CreateQPCQ(ConnectionClient &client, QueuePair &qp, CompletionQueue &cq)
         exit(EXIT_FAILURE);
     }
 
-    if (qp.SetupRC(response.gid, response.lid, response.qp_num))
+    if (FLAGS_rc)
     {
-        LOG(ERROR) << "Setup RC connection failed";
-        exit(EXIT_FAILURE);
+        if (qp.SetupRC(response.gid, response.lid, response.qp_num))
+        {
+            LOG(ERROR) << "Setup RC connection failed";
+            exit(EXIT_FAILURE);
+        }
+    }
+    else
+    {
+        if (ah.Create(response.gid, response.lid, response.qp_num))
+        {
+            LOG(ERROR) << "Create AH failed";
+            exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -189,18 +227,20 @@ int main(int argc, char **argv)
 
     CompletionQueue cq[FLAGS_qp_count];
     QueuePair qp[FLAGS_qp_count];
+    AddressHandle ah[FLAGS_qp_count];
     Benchmark bench;
 
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
-        CreateQPCQ(client, qp[i], cq[i]);
-        bench.AddEndPoint(&qp[i], &cq[i]);
+        CreateQPCQ(client, qp[i], cq[i], ah[i]);
+        bench.AddEndPoint(&qp[i], &cq[i], &ah[i]);
     }
 
     bench.Run();
 
     for (uint32_t i = 0; i < FLAGS_qp_count; ++i)
     {
+        ah[i].Reset();
         qp[i].Reset();
         cq[i].Reset();
     }

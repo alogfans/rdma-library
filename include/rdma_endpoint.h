@@ -9,6 +9,30 @@
 #include <atomic>
 #include <future>
 
+class AddressHandle
+{
+public:
+    AddressHandle() : ah_(nullptr) {}
+
+    ~AddressHandle();
+
+    AddressHandle(const AddressHandle &) = delete;
+
+    AddressHandle &operator=(const AddressHandle &) = delete;
+
+    void Reset();
+
+    int Create(ibv_gid gid, uint16_t lid, uint32_t qp_num);
+
+    ibv_ah *GetIbvAH() { return ah_; }
+
+    uint32_t GetQPNum() { return qp_num_; }
+
+private:
+    ibv_ah *ah_;
+    uint32_t qp_num_;
+};
+
 // CompletionQueue MUST have longer lifetime than QueuePair
 class CompletionQueue
 {
@@ -69,8 +93,6 @@ public:
 
     int SetupRC(ibv_gid gid, uint16_t lid, uint32_t qp_num);
 
-    int SetupUD();
-
     void Reset();
 
     State GetState() const
@@ -81,6 +103,13 @@ public:
     uint32_t GetQPNum() const;
 
     int Post(WorkRequestBase &wr_list);
+
+private:
+    int SetupUD();
+
+    int PostRC(WorkRequestBase &wr_list);
+
+    int PostUD(WorkRequestBase &wr_list);
 
 private:
     std::atomic<State> state_;

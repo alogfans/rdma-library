@@ -7,6 +7,7 @@ DEFINE_uint64(memory_region_mb, 256, "Memory region size in MB");
 DEFINE_uint32(port, 12345, "Server port");
 DEFINE_uint32(depth, 1, "Number of concurrent requests for each thread");
 DEFINE_uint32(block_size, 8, "Granularity for each request");
+DEFINE_bool(rc, true, "Use reliable connection");
 
 const static size_t kMegaBytes = 1024 * 1024;
 std::atomic<int> thread_id(0);
@@ -104,11 +105,23 @@ protected:
                               EndpointInfo &response)
     {
         QueuePair *qp = new QueuePair();
-        if (qp->Create(cq_) || qp->SetupRC(request.gid, request.lid, request.qp_num))
+        if (FLAGS_rc)
         {
-            LOG(ERROR) << "Unable to create QP";
-            delete qp;
-            return -1;
+            if (qp->Create(cq_) || qp->SetupRC(request.gid, request.lid, request.qp_num))
+            {
+                LOG(ERROR) << "Unable to create QP";
+                delete qp;
+                return -1;
+            }
+        }
+        else
+        {
+            if (qp->Create(cq_, QueuePair::TRANSPORT_TYPE_UD))
+            {
+                LOG(ERROR) << "Unable to create QP";
+                delete qp;
+                return -1;
+            }
         }
         response.gid = GetRdmaGid();
         response.lid = GetRdmaLid();
