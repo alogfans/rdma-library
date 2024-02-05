@@ -17,6 +17,18 @@ struct MemoryRegionKey
 {
     MemoryRegionKey(uint32_t lkey = 0, uint32_t rkey = 0) : lkey(lkey), rkey(rkey) {}
 
+    MemoryRegionKey(const MemoryRegionKey &rhs) : lkey(rhs.lkey), rkey(rhs.rkey) {}
+
+    MemoryRegionKey &operator=(const MemoryRegionKey &rhs)
+    {
+        if (this != &rhs)
+        {
+            lkey = rhs.lkey;
+            rkey = rhs.rkey;
+        }
+        return *this;
+    }
+
     bool operator==(const MemoryRegionKey &rhs) const
     {
         return (lkey == rhs.lkey && rkey == rhs.rkey);
@@ -36,6 +48,14 @@ MemoryRegionKey GetRdmaMemoryRegion(void *buf);
 
 void DeregisterRdmaMemoryRegion(void *addr);
 
+void StartEventLoopThread();
+
+void RegisterOnReceiveAsyncEventCallback(OnReceiveAsyncEventCallback &&callback);
+
+void RegisterOnReceiveWorkCompletionCallback(OnReceiveWorkCompletionCallback &&callback);
+
+// The following functions are typically called by librdma only
+
 int GetRdmaCompVector();
 
 ibv_context *GetRdmaContext();
@@ -54,12 +74,6 @@ uint16_t GetRdmaLid();
 
 bool IsRdmaAvailable();
 
-void RegisterOnReceiveAsyncEventCallback(OnReceiveAsyncEventCallback &&callback);
-
-void RegisterOnReceiveWorkCompletionCallback(OnReceiveWorkCompletionCallback &&callback);
-
 int ProcessEvents(int timeout, bool notify_cq_on_demand);
-
-void StartEventLoopThread();
 
 #endif // RDMA_RESOURCES_H

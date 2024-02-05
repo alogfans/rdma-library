@@ -3,7 +3,7 @@
 
 #include "rdma_resources.h"
 #include "rdma_endpoint.h"
-#include <unordered_map>
+#include "helper.h"
 
 #include <map>
 #include <atomic>
@@ -14,30 +14,24 @@
 #include <sstream>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <unordered_map>
 
-#define DIE_IF(func)                                   \
-    do                                                 \
-    {                                                  \
-        if (func)                                      \
-        {                                              \
-            PLOG(ERROR) << "Failed to execute " #func; \
-            exit(1);                                   \
-        }                                              \
+#define EXIT_ON_ERROR(func)                                       \
+    do                                                            \
+    {                                                             \
+        if (func)                                                 \
+        {                                                         \
+            PLOG(ERROR) << "Failed to execute statement: " #func; \
+            exit(1);                                              \
+        }                                                         \
     } while (0)
 
 DEFINE_string(rdma_device, "", "The name of the HCA device used "
                                "(Empty means using the first active device)");
 DEFINE_int32(rdma_port, 1, "The port number to use. For RoCE, it is always 1.");
 DEFINE_int32(rdma_gid_index, 1, "The GID index to use.");
-DEFINE_bool(rdma_local_mr_rwlock, false, "Enable rwlock of local memory region.");
-
-struct ReverseComparator
-{
-    bool operator()(const void *lhs, const void *rhs) const
-    {
-        return lhs > rhs;
-    }
-};
+DEFINE_uint32(rdma_comp_channels, 1, "Number of global completion channels.");
+DEFINE_bool(rdma_memory_region_lock, false, "Enable memory region lock for concurrent manipulation.");
 
 struct DeviceDeleter
 {
@@ -46,20 +40,21 @@ struct DeviceDeleter
     ibv_device **devices;
 };
 
-const static size_t kNumCompChannel = 8;
-
 struct RdmaGlobalResource
 {
-    pthread_rwlock_t rwlock;
-    uint8_t port;
     ibv_context *context = nullptr;
-    uint16_t lid;
-    ibv_gid gid;
-    int gid_index;
-    ibv_pd *protection_domain = nullptr;
-    ibv_comp_channel *completion_channel[kNumCompChannel] = {nullptr};
+    ibv_pd *pd = nullptr;
     int event_fd = -1;
-    std::map<void *, ibv_mr *, ReverseComparator> memory_regions; // start_addr -> memory region
+
+    ibv_comp_channel **comp_channel = nullptr;
+
+    RWSpinlock memory_regions_lock;
+    std::vector<ibv_mr *> memory_regions;
+
+    uint8_t port;
+    uint16_t lid;
+    int gid_index;
+    ibv_gid gid;
 };
 
 static RdmaGlobalResource *g_rdma_resource = nullptr;
@@ -134,34 +129,33 @@ static ibv_context *OpenRdmaDevice()
 static void DestroyRdmaGlobalResource()
 {
     for (auto &entry : g_rdma_resource->memory_regions)
-    {
-        ibv_dereg_mr(entry.second);
-    }
+        ibv_dereg_mr(entry);
     g_rdma_resource->memory_regions.clear();
     if (g_rdma_resource->event_fd >= 0)
     {
         close(g_rdma_resource->event_fd);
         g_rdma_resource->event_fd = -1;
     }
-    for (size_t i = 0; i < kNumCompChannel; ++i)
+    if (g_rdma_resource->comp_channel)
     {
-        if (g_rdma_resource->completion_channel[i])
+        for (size_t i = 0; i < FLAGS_rdma_comp_channels; ++i)
         {
-            ibv_destroy_comp_channel(g_rdma_resource->completion_channel[i]);
-            g_rdma_resource->completion_channel[i] = nullptr;
+            if (g_rdma_resource->comp_channel[i])
+                ibv_destroy_comp_channel(g_rdma_resource->comp_channel[i]);
+            delete[] g_rdma_resource->comp_channel;
+            g_rdma_resource->comp_channel = nullptr;
         }
     }
-    if (g_rdma_resource->protection_domain)
+    if (g_rdma_resource->pd)
     {
-        ibv_dealloc_pd(g_rdma_resource->protection_domain);
-        g_rdma_resource->protection_domain = nullptr;
+        ibv_dealloc_pd(g_rdma_resource->pd);
+        g_rdma_resource->pd = nullptr;
     }
     if (g_rdma_resource->context)
     {
         ibv_close_device(g_rdma_resource->context);
         g_rdma_resource->context = nullptr;
     }
-    pthread_rwlock_destroy(&g_rdma_resource->rwlock);
     delete g_rdma_resource;
 }
 
@@ -182,6 +176,8 @@ static std::string GidToString()
 static int JoinNonblockingPollSet(int event_fd, int data_fd)
 {
     epoll_event event;
+    memset(&event, 0, sizeof(epoll_event));
+
     int flags = fcntl(data_fd, F_GETFL, 0);
     if (flags == -1)
     {
@@ -194,7 +190,6 @@ static int JoinNonblockingPollSet(int event_fd, int data_fd)
         return -1;
     }
 
-    memset(&event, 0, sizeof(epoll_event));
     event.events = EPOLLIN | EPOLLET;
     event.data.fd = data_fd;
     if (epoll_ctl(event_fd, EPOLL_CTL_ADD, event.data.fd, &event))
@@ -221,9 +216,9 @@ static int SetupRdmaEventDescriptor()
     if (JoinNonblockingPollSet(event_fd, g_rdma_resource->context->async_fd))
         return -1;
 
-    for (size_t i = 0; i < kNumCompChannel; ++i)
+    for (size_t i = 0; i < FLAGS_rdma_comp_channels; ++i)
     {
-        if (JoinNonblockingPollSet(event_fd, g_rdma_resource->completion_channel[i]->fd))
+        if (JoinNonblockingPollSet(event_fd, g_rdma_resource->comp_channel[i]->fd))
             return -1;
     }
 
@@ -233,26 +228,33 @@ static int SetupRdmaEventDescriptor()
 static void CreateRdmaGlobalResourceImpl()
 {
     LOG_ASSERT(!IsRdmaAvailable());
+    if (FLAGS_rdma_comp_channels <= 0)
+    {
+        LOG(WARNING) << "--rdma_comp_channels must be greater than one.";
+        FLAGS_rdma_comp_channels = 1;
+    }
+
     g_rdma_resource = new RdmaGlobalResource();
-    DIE_IF(pthread_rwlock_init(&g_rdma_resource->rwlock, NULL));
-    DIE_IF(ibv_fork_init());
-    DIE_IF(atexit(DestroyRdmaGlobalResource));
+    EXIT_ON_ERROR(ibv_fork_init());
+    EXIT_ON_ERROR(atexit(DestroyRdmaGlobalResource));
     g_rdma_resource->context = OpenRdmaDevice();
-    DIE_IF(g_rdma_resource->context == nullptr);
+    LOG_ASSERT(g_rdma_resource->context);
     LOG(INFO) << "RDMA device: " << g_rdma_resource->context->device->name
               << ", LID: " << g_rdma_resource->lid
               << ", GID: (" << FLAGS_rdma_gid_index << ") " << GidToString();
-    g_rdma_resource->protection_domain = ibv_alloc_pd(g_rdma_resource->context);
-    DIE_IF(g_rdma_resource->protection_domain == nullptr);
-    for (size_t i = 0; i < kNumCompChannel; ++i)
+    g_rdma_resource->pd = ibv_alloc_pd(g_rdma_resource->context);
+    LOG_ASSERT(g_rdma_resource->pd);
+    g_rdma_resource->comp_channel = new ibv_comp_channel *[FLAGS_rdma_comp_channels];
+    for (size_t i = 0; i < FLAGS_rdma_comp_channels; ++i)
     {
-        g_rdma_resource->completion_channel[i] = ibv_create_comp_channel(g_rdma_resource->context);
-        DIE_IF(g_rdma_resource->completion_channel[i] == nullptr);
+        g_rdma_resource->comp_channel[i] = ibv_create_comp_channel(g_rdma_resource->context);
+        LOG_ASSERT(g_rdma_resource->comp_channel[i]);
     }
-    DIE_IF(SetupRdmaEventDescriptor());
+    EXIT_ON_ERROR(SetupRdmaEventDescriptor());
 
     ibv_device_attr attr;
-    DIE_IF(ibv_query_device(g_rdma_resource->context, &attr));
+    EXIT_ON_ERROR(ibv_query_device(g_rdma_resource->context, &attr));
+
     g_rdma_available.exchange(true);
 }
 
@@ -260,28 +262,24 @@ static pthread_once_t initialize_rdma_once = PTHREAD_ONCE_INIT;
 
 void CreateRdmaGlobalResource()
 {
-    DIE_IF(pthread_once(&initialize_rdma_once, CreateRdmaGlobalResourceImpl));
+    EXIT_ON_ERROR(pthread_once(&initialize_rdma_once, CreateRdmaGlobalResourceImpl));
 }
 
 MemoryRegionKey RegisterRdmaMemoryRegion(void *addr, size_t length, int access)
 {
     LOG_ASSERT(IsRdmaAvailable());
-    ibv_mr *mr = ibv_reg_mr(g_rdma_resource->protection_domain, addr, length, access);
+    ibv_mr *mr = ibv_reg_mr(g_rdma_resource->pd, addr, length, access);
     if (!mr)
     {
         PLOG(ERROR) << "Fail to register memory " << addr;
         return {0, 0};
     }
-    pthread_rwlock_wrlock(&g_rdma_resource->rwlock);
-    if (g_rdma_resource->memory_regions.count(addr))
-    {
-        LOG(WARNING) << "Memory region " << addr << " has been registered,"
-                     << " the previous registration will be destroyed";
-        ibv_mr *prev_mr = g_rdma_resource->memory_regions[addr];
-        ibv_dereg_mr(prev_mr);
-    }
-    g_rdma_resource->memory_regions[addr] = mr;
-    pthread_rwlock_unlock(&g_rdma_resource->rwlock);
+
+    RWSpinlock::WriteGuard guard(g_rdma_resource->memory_regions_lock,
+                                 FLAGS_rdma_memory_region_lock);
+
+    g_rdma_resource->memory_regions.push_back(mr);
+
     LOG(INFO) << "Memory region: " << addr << " -- " << (void *)((uintptr_t)addr + length)
               << ", Length: " << length << " (" << length / 1024 / 1024 << " MB)"
               << ", Permission: " << access << std::hex
@@ -292,46 +290,41 @@ MemoryRegionKey RegisterRdmaMemoryRegion(void *addr, size_t length, int access)
 MemoryRegionKey GetRdmaMemoryRegion(void *buf)
 {
     LOG_ASSERT(IsRdmaAvailable());
-    ibv_mr *mr = nullptr;
-    if (FLAGS_rdma_local_mr_rwlock)
+    RWSpinlock::ReadGuard guard(g_rdma_resource->memory_regions_lock,
+                                FLAGS_rdma_memory_region_lock);
+    for (auto iter = g_rdma_resource->memory_regions.begin();
+         iter != g_rdma_resource->memory_regions.end();
+         ++iter)
     {
-        pthread_rwlock_rdlock(&g_rdma_resource->rwlock);
+        if ((*iter)->addr <= buf && buf < (char *)((*iter)->addr) + (*iter)->length)
+        {
+            return {(*iter)->lkey, (*iter)->rkey};
+        }
     }
-    auto iter = g_rdma_resource->memory_regions.lower_bound(buf);
-    if (iter != g_rdma_resource->memory_regions.end())
-    {
-        mr = iter->second;
-    }
-    if (FLAGS_rdma_local_mr_rwlock)
-    {
-        pthread_rwlock_unlock(&g_rdma_resource->rwlock);
-    }
-    if (mr && mr->addr <= buf && buf < (void *)((intptr_t(mr->addr) + mr->length)))
-    {
-        return {mr->lkey, mr->rkey};
-    }
-    else
-    {
-        LOG(ERROR) << "Memory address " << buf << " is not registered";
-        return {0, 0};
-    }
+    return {0, 0};
 }
 
 void DeregisterRdmaMemoryRegion(void *addr)
 {
     LOG_ASSERT(IsRdmaAvailable());
-    pthread_rwlock_wrlock(&g_rdma_resource->rwlock);
-    if (!g_rdma_resource->memory_regions.count(addr))
+    RWSpinlock::WriteGuard guard(g_rdma_resource->memory_regions_lock,
+                                 FLAGS_rdma_memory_region_lock);
+    bool has_removed;
+    do
     {
-        LOG(ERROR) << "Memory address " << addr << " is not registered";
-    }
-    else
-    {
-        ibv_mr *mr = g_rdma_resource->memory_regions[addr];
-        ibv_dereg_mr(mr);
-        g_rdma_resource->memory_regions.erase(addr);
-    }
-    pthread_rwlock_unlock(&g_rdma_resource->rwlock);
+        has_removed = false;
+        for (auto iter = g_rdma_resource->memory_regions.begin();
+             iter != g_rdma_resource->memory_regions.end();
+             ++iter)
+        {
+            if ((*iter)->addr <= addr && addr < (char *)((*iter)->addr) + (*iter)->length)
+            {
+                g_rdma_resource->memory_regions.erase(iter);
+                has_removed = true;
+                break;
+            }
+        }
+    } while (has_removed);
 }
 
 int GetRdmaCompVector()
@@ -349,14 +342,14 @@ ibv_context *GetRdmaContext()
 ibv_pd *GetRdmaProtectionDomain()
 {
     LOG_ASSERT(IsRdmaAvailable());
-    return g_rdma_resource->protection_domain;
+    return g_rdma_resource->pd;
 }
 
 ibv_comp_channel *GetRdmaCompletionChannel()
 {
     LOG_ASSERT(IsRdmaAvailable());
-    int index = (g_comp_channel_index++) % kNumCompChannel;
-    return g_rdma_resource->completion_channel[index];
+    int index = (g_comp_channel_index++) % FLAGS_rdma_comp_channels;
+    return g_rdma_resource->comp_channel[index];
 }
 
 uint8_t GetRdmaPortNum()
@@ -543,11 +536,11 @@ int ProcessEvents(int timeout, bool notify_cq_on_demand)
         return ProcessContextEvent();
     }
 
-    for (size_t i = 0; i < kNumCompChannel; ++i)
+    for (size_t i = 0; i < FLAGS_rdma_comp_channels; ++i)
     {
-        if (event.data.fd == g_rdma_resource->completion_channel[i]->fd)
+        if (event.data.fd == g_rdma_resource->comp_channel[i]->fd)
         {
-            return ProcessCompletionChannelEvent(g_rdma_resource->completion_channel[i],
+            return ProcessCompletionChannelEvent(g_rdma_resource->comp_channel[i],
                                                  notify_cq_on_demand);
         }
     }
@@ -594,7 +587,7 @@ static void DestroyEventLoopThread()
 void StartEventLoopThread()
 {
     LOG_ASSERT(IsRdmaAvailable());
-    DIE_IF(atexit(DestroyEventLoopThread));
+    EXIT_ON_ERROR(atexit(DestroyEventLoopThread));
     g_eventloop_running.store(true);
-    DIE_IF(pthread_create(&g_eventloop_thread, nullptr, EventLoopRunner, nullptr));
+    EXIT_ON_ERROR(pthread_create(&g_eventloop_thread, nullptr, EventLoopRunner, nullptr));
 }

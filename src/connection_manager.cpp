@@ -202,7 +202,7 @@ int ConnectionManager::ProcessMessage(int conn_fd)
 
     switch (opcode)
     {
-    case OOB_CTRL_OP_ESTABLISH_RC:
+    case OOB_CTRL_OP_EXCHANGE_ENDPOINT_INFO:
     {
         if (payload_buffer.size() != sizeof(EndpointInfo))
         {
@@ -213,9 +213,9 @@ int ConnectionManager::ProcessMessage(int conn_fd)
         EndpointInfo request, response;
         request.DecodeFrom(payload_buffer);
         uint8_t retcode = OOB_CTRL_RET_OK;
-        if (OnEstablishRC(conn_fd, request, response))
+        if (OnExchangeEndpointInfo(conn_fd, request, response))
         {
-            PLOG(WARNING) << "Failed to establish RC connection";
+            PLOG(WARNING) << "Failed to exchange endpoint info";
             retcode = OOB_CTRL_RET_SERVER_ERROR;
         }
         std::vector<EndpointInfo> response_list;
@@ -349,11 +349,11 @@ void ConnectionClient::Close()
     }
 }
 
-int ConnectionClient::EstablishRC(const EndpointInfo &request, EndpointInfo &response)
+int ConnectionClient::ExchangeEndpointInfo(const EndpointInfo &request, EndpointInfo &response)
 {
     std::vector<EndpointInfo> request_list, response_list;
     request_list.push_back(request.EncodeTo());
-    if (SendMessage(conn_fd_, OOB_CTRL_OP_ESTABLISH_RC, request_list))
+    if (SendMessage(conn_fd_, OOB_CTRL_OP_EXCHANGE_ENDPOINT_INFO, request_list))
     {
         PLOG(ERROR) << "Failed to send message";
         return -1;

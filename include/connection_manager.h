@@ -110,9 +110,9 @@ protected:
 
     virtual void OnCloseConnection(int fd) {}
 
-    virtual int OnEstablishRC(int fd, const EndpointInfo &request, EndpointInfo &response)
+    virtual int OnExchangeEndpointInfo(int fd, const EndpointInfo &request, EndpointInfo &response)
     {
-        LOG(WARNING) << "Unspecified establishment implementation";
+        LOG(WARNING) << "Unspecified implementation";
         return -1;
     }
 
@@ -138,7 +138,7 @@ public:
 
     void Close();
 
-    int EstablishRC(const EndpointInfo &request, EndpointInfo &response);
+    int ExchangeEndpointInfo(const EndpointInfo &request, EndpointInfo &response);
 
     int RegisterMemoryRegion(const MemoryRegionInfo &mr);
 

@@ -1,6 +1,6 @@
 #include "connection_manager.h"
 #include "rdma_endpoint.h"
-#include "utils.h"
+#include "helper.h"
 
 DEFINE_uint64(memory_region_mb, 256, "Memory region size in MB");
 DEFINE_uint32(port, 12345, "Server port");
@@ -46,8 +46,8 @@ protected:
         close(fd);
     }
 
-    virtual int OnEstablishRC(int fd, const EndpointInfo &request,
-                              EndpointInfo &response)
+    virtual int OnExchangeEndpointInfo(int fd, const EndpointInfo &request,
+                                       EndpointInfo &response)
     {
         QueuePair *qp = new QueuePair();
         if (qp->Create(cq_) || qp->SetupRC(request.gid, request.lid, request.qp_num))

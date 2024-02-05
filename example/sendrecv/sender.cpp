@@ -1,6 +1,6 @@
 #include "connection_manager.h"
 #include "rdma_endpoint.h"
-#include "utils.h"
+#include "helper.h"
 
 #include <thread>
 #include <iomanip>
@@ -165,7 +165,7 @@ void CreateQPCQ(ConnectionClient &client, QueuePair &qp, CompletionQueue &cq, Ad
     request.lid = GetRdmaLid();
     request.qp_num = qp.GetQPNum();
 
-    if (client.EstablishRC(request, response))
+    if (client.ExchangeEndpointInfo(request, response))
     {
         LOG(ERROR) << "Establish RC connection failed";
         exit(EXIT_FAILURE);
